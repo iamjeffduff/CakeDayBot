@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+venv/
+env/
+
+# SQLite database
+*.db
+
+# Sensitive files
+*.env
+secrets.json
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Configuration file
+config.py
