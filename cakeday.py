@@ -6,12 +6,6 @@ from google import genai  # Import the genai library
 from pytz import timezone as pytz_timezone  # Rename pytz's timezone to avoid conflicts
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer  # Import sentiment analyzer
 
-CLIENT_ID = "JC6mNYyOU_Kmy91JZyz3Sg"
-CLIENT_SECRET = "OhjVq0nqTNsRQzy5P9Loez08aZtX8w"
-USER_AGENT = "HaveYourCakeBot/1.0 (by /u/LordTSG)"
-REDDIT_USERNAME = "HaveYourCakeBot"
-REDDIT_PASSWORD = "yNydiUn7E$87*V#"
-
 DATABASE_NAME = "subreddits.db"
 API_CALL_DELAY = 1  # Delay in seconds between checking each user
 
