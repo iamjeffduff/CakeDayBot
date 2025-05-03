@@ -37,7 +37,7 @@ pip install -r requirements.txt
 ### 3. Configure the Bot
 Create a `config.py` file in the project directory and add your credentials:
 ```python
-# filepath: d:\WebDev\CakeDayBot\config.py
+# config.py
 CLIENT_ID = "your_reddit_client_id"
 CLIENT_SECRET = "your_reddit_client_secret"
 USER_AGENT = "your_user_agent"
