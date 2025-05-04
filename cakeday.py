@@ -628,12 +628,7 @@ def get_bot_comment_score(reddit, subreddit_name, days_to_check=30):
         total_score = 0
         comment_count = 0
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_to_check)
-        
-        print(f"\n    📊 Calculating score for r/{subreddit_name}...")
-        print(f"    📅 Checking comments from the last {days_to_check} days")
-        
-        # Fetch the bot's comments and filter by subreddit
-        print(f"    📝 Fetching last 100 comments...")
+
         for comment in bot_user.comments.new(limit=100):
             created_date = datetime.fromtimestamp(comment.created_utc, timezone.utc)
             
@@ -642,7 +637,7 @@ def get_bot_comment_score(reddit, subreddit_name, days_to_check=30):
                 total_score += comment.score
                 comment_count += 1
 
-        print(f"\n    📈 Summary for r/{subreddit_name}:")
+        print(f"    📈 Summary for r/{subreddit_name}:")
         print(f"      - Total comments found: {comment_count}")
         print(f"      - Total score: {total_score:+}")
         print(f"      - Average score per comment: {(total_score/comment_count if comment_count else 0):+.2f}")
