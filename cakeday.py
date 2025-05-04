@@ -6,8 +6,9 @@ from google import genai  # Import the genai library
 from pytz import timezone as pytz_timezone  # Rename pytz's timezone to avoid conflicts
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer  # Import sentiment analyzer
 from config import CLIENT_ID, CLIENT_SECRET, USER_AGENT, REDDIT_USERNAME, REDDIT_PASSWORD, DATABASE_NAME, API_CALL_DELAY, GEMINI_API_KEY  # Import global variables
+import prawcore
+import random
 
-# Register custom adapter and converter for DATE type
 def adapt_date(date_obj):
     return date_obj.isoformat()  # Convert date to ISO 8601 string
 
@@ -17,36 +18,177 @@ def convert_date(date_str):
 sqlite3.register_adapter(datetime.date, adapt_date)
 sqlite3.register_converter("DATE", convert_date)
 
-def get_reddit_instance():
-    reddit = praw.Reddit(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        user_agent=USER_AGENT,
-        username=REDDIT_USERNAME,
-        password=REDDIT_PASSWORD
-    )
-    return reddit
-
-def get_gemini_client():
-    return genai.Client(api_key=GEMINI_API_KEY)
-
-def post_cake_day_comment(reddit_obj, target_obj, gemini_message):
+def get_reddit_instance(max_retries=3, initial_delay=1):
     """
-    Posts the generated Cake Day message as a comment.
+    Get a Reddit API client with retry logic for connection issues.
+
+    Args:
+        max_retries: Maximum number of retry attempts (default: 3)
+        initial_delay: Initial delay between retries in seconds (default: 1)
+
+    Returns:
+        praw.Reddit: A configured Reddit API client
+    """
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            reddit = praw.Reddit(
+                client_id=CLIENT_ID,
+                client_secret=CLIENT_SECRET,
+                user_agent=USER_AGENT,
+                username=REDDIT_USERNAME,
+                password=REDDIT_PASSWORD
+            )
+            # Test the connection by accessing a property
+            _ = reddit.user.me()
+            return reddit
+
+        except prawcore.OAuthException as e:
+            print(f"    ❌ Reddit authentication error: Invalid credentials")
+            raise  # Re-raise as this is a configuration issue that needs immediate attention
+
+        except prawcore.ResponseException as e:
+            if e.response.status_code == 429:  # Too Many Requests
+                if attempt < max_retries - 1:
+                    delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
+                    print(f"    ⚠️ Reddit API rate limit exceeded. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
+                    time.sleep(delay)
+                else:
+                    print(f"    ❌ Reddit API rate limit exceeded after {max_retries} attempts")
+                    raise
+            else:
+                print(f"    ❌ Reddit API error: {e.response.status_code} - {str(e)}")
+                raise
+
+        except (prawcore.ServerError, prawcore.RequestException) as e:
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"    ⚠️ Reddit API connection error. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+            else:
+                print(f"    ❌ Failed to connect to Reddit API after {max_retries} attempts: {str(e)}")
+                raise
+
+        except Exception as e:
+            print(f"    ❌ Unexpected error connecting to Reddit API: {str(e)}")
+            raise
+
+        attempt += 1
+
+    raise Exception(f"Failed to initialize Reddit client after {max_retries} attempts")
+
+def get_gemini_client(max_retries=3, initial_delay=1):
+    """
+    Get a Gemini API client with retry logic for connection issues.
+
+    Args:
+        max_retries: Maximum number of retry attempts (default: 3)
+        initial_delay: Initial delay between retries in seconds (default: 1)
+
+    Returns:
+        genai.Client: A configured Gemini API client
+    """
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            # Test the client with a simple request
+            client.models.list()
+            return client
+
+        except genai.AuthenticationError as e:
+            print(f"    ❌ Gemini API authentication error: Invalid API key")
+            raise  # Re-raise as this is a configuration issue that needs immediate attention
+
+        except genai.QuotaExceededError as e:
+            print(f"    ❌ Gemini API quota exceeded: {str(e)}")
+            raise  # Re-raise as retrying won't help with quota issues
+
+        except (genai.ServiceUnavailableError, genai.ConnectionError) as e:
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"    ⚠️ Gemini API connection error. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+            else:
+                print(f"    ❌ Failed to connect to Gemini API after {max_retries} attempts: {str(e)}")
+                raise
+
+        except Exception as e:
+            print(f"    ❌ Unexpected error connecting to Gemini API: {str(e)}")
+            raise
+
+        attempt += 1
+
+    raise Exception(f"Failed to initialize Gemini client after {max_retries} attempts")
+
+def post_cake_day_comment(reddit_obj, target_obj, gemini_message, max_retries=3, initial_delay=1):
+    """
+    Posts the generated Cake Day message as a comment with retry logic and specific error handling.
 
     Args:
         reddit_obj: The PRAW Reddit instance.
         target_obj: The PRAW object to reply to (either a Post or a Comment).
         gemini_message: The message generated by Gemini.
+        max_retries: Maximum number of retry attempts (default: 3).
+        initial_delay: Initial delay between retries in seconds (default: 1).
+
+    Returns:
+        bool: True if comment was posted successfully, False otherwise.
     """
-    try:
-        comment_text = f"{gemini_message}\n\n*I am a bot sending some cheer in a world that needs more. Run by /u/LordTSG*"
-        target_obj.reply(comment_text)
-        print(f"    💬 Posted comment to {target_obj.author.name if target_obj.author else 'deleted user'}: {gemini_message}")
-        print(f"    🔗 URL: http://reddit.com{target_obj.permalink}\n")
-              
-    except Exception as e:
-        print(f"    ⚠️ Error posting comment: {e}")
+    comment_text = f"{gemini_message}\n\n*I am a bot sending some cheer in a world that needs more. Run by /u/LordTSG*"
+    attempt = 0
+    
+    while attempt < max_retries:
+        try:
+            # Attempt to post the comment
+            comment = target_obj.reply(comment_text)
+            print(f"    💬 Posted comment to {target_obj.author.name if target_obj.author else 'deleted user'}: {gemini_message}")
+            print(f"    🔗 URL: http://reddit.com{target_obj.permalink}\n")
+            return True
+
+        except prawcore.exceptions.RateLimitExceeded as e:
+            # Handle rate limiting with exponential backoff
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"    ⚠️ Rate limit exceeded. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+            else:
+                print(f"    ❌ Failed to post comment after {max_retries} attempts due to rate limiting")
+                return False
+
+        except prawcore.exceptions.Forbidden as e:
+            # Handle permission errors (e.g., banned from subreddit)
+            print(f"    ❌ Forbidden error: Bot may be banned from this subreddit - {str(e)}")
+            return False
+
+        except prawcore.exceptions.ServerError as e:
+            # Handle Reddit server errors
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"    ⚠️ Reddit server error. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+            else:
+                print(f"    ❌ Reddit server error after {max_retries} attempts: {str(e)}")
+                return False
+
+        except prawcore.exceptions.RequestException as e:
+            # Handle network-related errors
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"    ⚠️ Network error. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+            else:
+                print(f"    ❌ Network error after {max_retries} attempts: {str(e)}")
+                return False
+
+        except Exception as e:
+            # Handle any other unexpected errors
+            print(f"    ❌ Unexpected error posting comment: {str(e)}")
+            return False
+
+        attempt += 1
+
+    return False
 
 def _get_title_context(context_type, post_title):
     if context_type == "comment":
@@ -54,37 +196,123 @@ def _get_title_context(context_type, post_title):
     else:
         return f"The post is titled '{post_title}'. "
 
-def has_been_wished(username):
-    conn = sqlite3.connect(DATABASE_NAME, detect_types=sqlite3.PARSE_DECLTYPES)
-    cursor = conn.cursor()
-    today = datetime.now().date()
-
-    # Check if the user has been wished today
-    cursor.execute("SELECT wished_date FROM wished_users WHERE username = ?", (username,))
-    result = cursor.fetchone()
-
-    if result:
-        wished_date = result[0]
-        if isinstance(wished_date, str):  # Ensure the date is converted if stored as a string
-            wished_date = datetime.strptime(wished_date, "%Y-%m-%d").date()
-
-        if wished_date == today:  # User has already been wished today
-            conn.close()
-            return True
-        else:  # User's cake day has passed, remove them from the table
-            cursor.execute("DELETE FROM wished_users WHERE username = ?", (username,))
+def execute_db_operation(operation, params=None, max_retries=3, initial_delay=1):
+    """
+    Execute a database operation with retry logic.
+    
+    Args:
+        operation: SQL query to execute
+        params: Parameters for the SQL query
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay between retries in seconds
+        
+    Returns:
+        tuple: (success, result) where success is a boolean and result is the query result or None
+    """
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            conn = sqlite3.connect(DATABASE_NAME, detect_types=sqlite3.PARSE_DECLTYPES, timeout=20)
+            cursor = conn.cursor()
+            
+            if params:
+                cursor.execute(operation, params)
+            else:
+                cursor.execute(operation)
+                
+            result = cursor.fetchall() if cursor.description else None
             conn.commit()
-
-    conn.close()
-    return False
+            conn.close()
+            return True, result
+            
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e) and attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"    ⚠️ Database is locked. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+            else:
+                print(f"    ❌ Database error: {str(e)}")
+                return False, None
+                
+        except sqlite3.IntegrityError as e:
+            print(f"    ❌ Database integrity error: {str(e)}")
+            return False, None
+            
+        except Exception as e:
+            print(f"    ❌ Unexpected database error: {str(e)}")
+            return False, None
+            
+        finally:
+            if 'conn' in locals():
+                try:
+                    conn.close()
+                except:
+                    pass
+                    
+        attempt += 1
+    
+    return False, None
 
 def mark_as_wished(username):
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    today = datetime.now().date().isoformat()  # Convert to ISO 8601 string
-    cursor.execute("INSERT OR REPLACE INTO wished_users (username, wished_date) VALUES (?, ?)", (username, today))
-    conn.commit()
-    conn.close()
+    today = datetime.now().date().isoformat()
+    success, _ = execute_db_operation(
+        "INSERT OR REPLACE INTO wished_users (username, wished_date) VALUES (?, ?)",
+        (username, today)
+    )
+    return success
+
+def has_been_wished(username):
+    today = datetime.now().date()
+    success, result = execute_db_operation(
+        "SELECT wished_date FROM wished_users WHERE username = ?",
+        (username,)
+    )
+    
+    if not success or not result:
+        return False
+        
+    wished_date = result[0][0]
+    if isinstance(wished_date, str):
+        wished_date = datetime.strptime(wished_date, "%Y-%m-%d").date()
+        
+    if wished_date == today:
+        return True
+    else:
+        execute_db_operation(
+            "DELETE FROM wished_users WHERE username = ?",
+            (username,)
+        )
+        return False
+
+def clear_expired_wished_users():
+    today = datetime.now().date().isoformat()
+    success, _ = execute_db_operation(
+        "DELETE FROM wished_users WHERE wished_date < ?",
+        (today,)
+    )
+    return success
+
+def get_subreddit_info_from_database():
+    success, result = execute_db_operation(
+        "SELECT subreddit_name, last_post_checked FROM subreddits"
+    )
+    return {row[0]: row[1] for row in result} if success and result else {}
+
+def update_last_post_checked(subreddit_name, last_post_checked):
+    success, _ = execute_db_operation(
+        "UPDATE subreddits SET last_post_checked = ? WHERE subreddit_name = ?",
+        (last_post_checked, subreddit_name)
+    )
+    return success
+
+def update_scan_time(subreddit_name):
+    now_utc = datetime.now(timezone.utc)
+    timestamp_numeric = now_utc.timestamp()
+    success, _ = execute_db_operation(
+        "UPDATE subreddits SET last_scan_time = ? WHERE subreddit_name = ?",
+        (timestamp_numeric, subreddit_name)
+    )
+    return success
 
 def is_cake_day(reddit, username):
     try:
@@ -131,6 +359,58 @@ def analyze_sentiment(text):
     else:
         return "neutral"
 
+def generate_cake_day_message(client, prompt, max_retries=3, initial_delay=1):
+    """
+    Generate a cake day message using the Gemini API with retry logic.
+
+    Args:
+        client: The Gemini API client
+        prompt: The prompt to generate content from
+        max_retries: Maximum number of retry attempts (default: 3)
+        initial_delay: Initial delay between retries in seconds (default: 1)
+
+    Returns:
+        str: The generated message or a fallback message if all retries fail
+    """
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+            )
+            return response.text
+
+        except genai.RateLimitExceededError as e:
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"    ⚠️ Gemini API rate limit exceeded. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+            else:
+                print(f"    ❌ Gemini API rate limit exceeded after {max_retries} attempts")
+                return "Happy Cake Day! 🎂"  # Fallback message
+
+        except genai.InvalidRequestError as e:
+            print(f"    ❌ Invalid request to Gemini API: {str(e)}")
+            return "Happy Cake Day! 🎂"  # Fallback for invalid requests
+
+        except (genai.ServiceUnavailableError, genai.ConnectionError) as e:
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"    ⚠️ Gemini API connection error. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+            else:
+                print(f"    ❌ Gemini API connection error after {max_retries} attempts: {str(e)}")
+                return "Happy Cake Day! 🎂"  # Fallback message
+
+        except Exception as e:
+            print(f"    ❌ Unexpected error calling Gemini API: {str(e)}")
+            return "Happy Cake Day! 🎂"  # Fallback message
+
+        attempt += 1
+
+    return "Happy Cake Day! 🎂"  # Final fallback if all retries fail
+
 def process_item(reddit, item, item_type, subreddit_name, post_title=None):
     """
     Processes a Reddit item (Post or Comment) to check for Cake Day and post a message.
@@ -155,18 +435,27 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None):
             if item_type == "comment":
                 # Traverse the comment tree for relevant context
                 parent = item.parent()
-                if parent:
+                parent_chain = []
+                sibling_chain = []
+
+                # Fetch up to 5 parent comments
+                while parent and len(parent_chain) < 5:
                     parent_text = parent.body[:250] if hasattr(parent, "body") else (parent.selftext[:250] if hasattr(parent, "selftext") else "(no text content)")
                     parent_sentiment = analyze_sentiment(parent_text)
-                    comment_chain_context.append({
+                    parent_chain.insert(0, {  # Insert at the beginning to maintain order
                         "author": parent.author.name if parent.author else "[deleted]",
                         "text": parent_text,
                         "type": "post" if isinstance(parent, praw.models.Submission) else "comment",
                         "post_hint": parent.post_hint if hasattr(parent, "post_hint") else None,
                         "sentiment": parent_sentiment,
-                        "reddit_score": f"{parent.score:+}" if isinstance(parent, praw.models.Comment) else f"{parent.score:+}",  # Add "+" or "-" prefix
+                        "reddit_score": f"{parent.score:+}" if hasattr(parent, "score") else "+0",
                         "is_cake_day": parent.author.name == item.author.name if parent.author else False
                     })
+                    parent = parent.parent() if hasattr(parent, "parent") else None
+
+                # Add the parent chain to the context
+                comment_chain_context.extend(parent_chain)
+
                 # Add the current comment
                 current_text = item.body[:250]
                 current_sentiment = analyze_sentiment(current_text)
@@ -176,27 +465,31 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None):
                     "type": "comment",
                     "post_hint": item.post_hint if hasattr(item, "post_hint") else None,
                     "sentiment": current_sentiment,
-                    "reddit_score": item_score,  # Add "+" or "-" prefix
+                    "reddit_score": f"{item.score:+}",
                     "is_cake_day": True
                 })
-                # Add sibling comments (limit to 5-10 total comments)
-                if isinstance(parent, praw.models.Comment):  # Ensure parent is a Comment
-                    siblings = parent.replies
-                    for sibling in siblings[:8]:
-                        if sibling != item:
-                            sibling_text = sibling.body[:250] if hasattr(sibling, "body") else "(no text content)"
-                            sibling_sentiment = analyze_sentiment(sibling_text)
-                            comment_chain_context.append({
-                                "author": sibling.author.name if sibling.author else "[deleted]",
-                                "text": sibling_text,
-                                "type": "comment",
-                                "post_hint": sibling.post_hint if hasattr(sibling, "post_hint") else None,
-                                "sentiment": sibling_sentiment,
-                                "reddit_score": f"{sibling.score:+}",  # Add "+" or "-" prefix
-                                "is_cake_day": sibling.author.name == item.author.name if sibling.author else False
-                            })
+
+                # Fetch up to 5 sibling comments
+                siblings = item.parent().replies if hasattr(item.parent(), "replies") else []
+                for sibling in siblings:
+                    if sibling != item and len(sibling_chain) < 5:
+                        sibling_text = sibling.body[:250] if hasattr(sibling, "body") else "(no text content)"
+                        sibling_sentiment = analyze_sentiment(sibling_text)
+                        sibling_chain.append({
+                            "author": sibling.author.name if sibling.author else "[deleted]",
+                            "text": sibling_text,
+                            "type": "comment",
+                            "post_hint": sibling.post_hint if hasattr(sibling, "post_hint") else None,
+                            "sentiment": sibling_sentiment,
+                            "reddit_score": f"{sibling.score:+}",
+                            "is_cake_day": sibling.author.name == item.author.name if sibling.author else False
+                        })
+
+                # Add the sibling chain to the context
+                comment_chain_context.extend(sibling_chain)
+
             elif item_type == "post":
-                # Add the post's selftext and top comments
+                # Add the post's selftext as the first item in the context
                 post_text = item.selftext[:250] if item.selftext else "(no text content)"
                 post_sentiment = analyze_sentiment(post_text)
                 comment_chain_context.append({
@@ -205,21 +498,32 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None):
                     "type": "post",
                     "post_hint": item.post_hint if hasattr(item, "post_hint") else None,
                     "sentiment": post_sentiment,
-                    "reddit_score": item_score,  # Add "+" or "-" prefix
+                    "reddit_score": f"{item.score:+}",
                     "is_cake_day": True
                 })
-                for top_comment in item.comments[:9]:
-                    top_comment_text = top_comment.body[:250] if hasattr(top_comment, "body") else "(no text content)"
-                    top_comment_sentiment = analyze_sentiment(top_comment_text)
-                    comment_chain_context.append({
-                        "author": top_comment.author.name if top_comment.author else "[deleted]",
-                        "text": top_comment_text,
+
+                # Fetch up to 10 top-level comments
+                submission = item
+                submission.comments.replace_more(limit=None)  # Load all top-level comments
+                for comment in submission.comments[:10]:  # Limit to 10 comments
+                    comment_text = comment.body[:250] if hasattr(comment, "body") else "(no text content)"
+                    comment_sentiment = analyze_sentiment(comment_text)
+                    comment_data = {
+                        "author": comment.author.name if comment.author else "[deleted]",
+                        "text": comment_text,
                         "type": "comment",
-                        "post_hint": top_comment.post_hint if hasattr(top_comment, "post_hint") else None,
-                        "sentiment": top_comment_sentiment,
-                        "reddit_score": f"{top_comment.score:+}",  # Add "+" or "-" prefix
-                        "is_cake_day": top_comment.author.name == item.author.name if top_comment.author else False
-                    })
+                        "post_hint": comment.post_hint if hasattr(comment, "post_hint") else None,
+                        "sentiment": comment_sentiment,
+                        "reddit_score": f"{comment.score:+}",
+                        "is_cake_day": comment.author.name == item.author.name if comment.author else False
+                    }
+
+                    # Insert the Cake Day comment in its correct position
+                    if comment.author and comment.author.name == item.author.name:
+                        comment_data["is_cake_day"] = True
+                    
+                    comment_chain_context.append(comment_data) # Add the comment to the context
+                    
         except Exception as e:
             print(f"    ⚠️ Error collecting comment chain context: {e}")
 
@@ -265,16 +569,12 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None):
               - Sentiment Trend: {sentiment_trend}
         """)
 
-        client = get_gemini_client()
         try:
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",  # Or whichever Gemini model you are using
-                contents=gemini_message_prompt,
-            )
-            gemini_message = response.text
+            client = get_gemini_client()
+            gemini_message = generate_cake_day_message(client, gemini_message_prompt)
         except Exception as e:
-            print(f"    ⚠️  Error calling Gemini API: {e}")
-            gemini_message = "Happy Cake Day!"  # Provide a fallback message
+            print(f"    ⚠️ Failed to generate message using Gemini API, using fallback: {str(e)}")
+            gemini_message = "Happy Cake Day! 🎂"  # Ultimate fallback message
 
         # Post the Cake Day wish
         post_cake_day_comment(reddit, item, gemini_message)
@@ -311,69 +611,57 @@ def process_subreddit(reddit, subreddit_name, last_post_checked):
     print(f"  🎉 Total Cake Days found in r/{subreddit_name}: {cake_day_count} {"" if cake_day_count == 0 else "🎉🎉"}")
     return new_last_post_checked
 
-def get_subreddit_info_from_database():
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT subreddit_name, last_post_checked FROM subreddits")
-    subreddit_info = {row[0]: row[1] for row in cursor.fetchall()}
-    conn.close()
-    return subreddit_info
-
-def update_last_post_checked(subreddit_name, last_post_checked):
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE subreddits SET last_post_checked = ? WHERE subreddit_name = ?", (last_post_checked, subreddit_name))
-    conn.commit()
-    conn.close()
-
-def update_scan_time(subreddit_name):
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    now_utc = datetime.now(timezone.utc)
-    timestamp_numeric = now_utc.timestamp()
-    cursor.execute("UPDATE subreddits SET last_scan_time = ? WHERE subreddit_name = ?", (timestamp_numeric, subreddit_name))
-    conn.commit()
-    conn.close()
-
-def clear_expired_wished_users():
-    """Remove users from the wished_users table whose cake day has passed."""
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    today = datetime.now().date().isoformat()  # Get today's date in ISO 8601 format
-    cursor.execute("DELETE FROM wished_users WHERE wished_date < ?", (today,))
-    conn.commit()
-    conn.close()
-
-def get_bot_comment_score(reddit, subreddit_name):
+def get_bot_comment_score(reddit, subreddit_name, days_to_check=30):
     """
     Calculate the overall score of the bot's comments in a subreddit.
 
     Args:
         reddit: The PRAW Reddit instance.
         subreddit_name: The name of the subreddit.
+        days_to_check: Number of days to look back for comments (default: 30)
 
     Returns:
-        int: The total score of the bot's comments in the subreddit.
+        tuple: (total_score, comment_count)
     """
     try:
-        bot_user = reddit.redditor(REDDIT_USERNAME)  # Get the bot's user profile
+        bot_user = reddit.redditor(REDDIT_USERNAME)
         total_score = 0
-
+        comment_count = 0
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_to_check)
+        
+        print(f"\n    📊 Calculating score for r/{subreddit_name}...")
+        print(f"    📅 Checking comments from the last {days_to_check} days")
+        
         # Fetch the bot's comments and filter by subreddit
-        for comment in bot_user.comments.new(limit=None):  # Fetch all recent comments by the bot
-            if comment.subreddit.display_name.lower() == subreddit_name.lower():
+        print(f"    📝 Fetching last 100 comments...")
+        for comment in bot_user.comments.new(limit=100):
+            created_date = datetime.fromtimestamp(comment.created_utc, timezone.utc)
+            
+            if (comment.subreddit.display_name.lower() == subreddit_name.lower() and 
+                created_date > cutoff_date):
                 total_score += comment.score
+                comment_count += 1
 
-        return total_score
+        print(f"\n    📈 Summary for r/{subreddit_name}:")
+        print(f"      - Total comments found: {comment_count}")
+        print(f"      - Total score: {total_score:+}")
+        print(f"      - Average score per comment: {(total_score/comment_count if comment_count else 0):+.2f}")
+        
+        return total_score, comment_count
     except Exception as e:
         print(f"    ⚠️ Error fetching bot comments for r/{subreddit_name}: {e}")
-        return 0
+        return 0, 0
 
 if __name__ == "__main__":
     clear_expired_wished_users()  # Clear expired wished users at the start
     start_time = time.time()  # Store the start timestamp
-    reddit_time = time.time() # Store the start timestamp to time each reddit scan
+    reddit_time = time.time()  # Store the start timestamp to time each reddit scan
     reddit = get_reddit_instance()
+
+    # Display the bot's total comment karma once at the start
+    bot_user = reddit.redditor(REDDIT_USERNAME)
+    print(f"    🔍 Bot's total comment karma: {bot_user.comment_karma}")
+
     subreddit_info = get_subreddit_info_from_database()
 
     if not subreddit_info:
@@ -383,7 +671,7 @@ if __name__ == "__main__":
         for subreddit_name, last_post_checked in subreddit_info.items():
             # Calculate the bot's overall score in the subreddit
             bot_score = get_bot_comment_score(reddit, subreddit_name)
-            print(f"\nScanning r/{subreddit_name}... (overall score: {bot_score:+})")
+            print(f"\nScanning r/{subreddit_name}...")
 
             new_last_post_checked = process_subreddit(reddit, subreddit_name, last_post_checked)
             update_last_post_checked(subreddit_name, new_last_post_checked)
