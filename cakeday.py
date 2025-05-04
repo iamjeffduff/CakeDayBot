@@ -637,7 +637,7 @@ def get_bot_comment_score(reddit, subreddit_name, days_to_check=30):
                 total_score += comment.score
                 comment_count += 1
 
-        print(f"    📈 Summary for r/{subreddit_name}:")
+        print(f"\n    📈 Summary for r/{subreddit_name}:")
         print(f"      - Total comments found: {comment_count}")
         print(f"      - Total score: {total_score:+}")
         print(f"      - Average score per comment: {(total_score/comment_count if comment_count else 0):+.2f}")
