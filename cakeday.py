@@ -593,6 +593,7 @@ def process_subreddit(reddit, subreddit_name, last_post_checked):
             new_last_post_checked = post.id  # Set to the first post checked
 
         if last_post_checked and post.id == last_post_checked:
+            print(f"    ⚠️ Reached the last checked post: {post.title}. Stopping scan.")
             break  # We've reached the last checked post
 
         if post.author:
@@ -608,7 +609,7 @@ def process_subreddit(reddit, subreddit_name, last_post_checked):
                     cake_day_count += 1  # Increment only if a Cake Day was found
                 time.sleep(API_CALL_DELAY)
 
-    print(f"  🎉 Total Cake Days found in r/{subreddit_name}: {cake_day_count} {"" if cake_day_count == 0 else "🎉🎉"}")
+    print(f"🎉 Total Cake Days found in r/{subreddit_name}: {cake_day_count} {"" if cake_day_count == 0 else "🎉🎉"}")
     return new_last_post_checked
 
 def get_bot_comment_score(reddit, subreddit_name, days_to_check=30):
@@ -637,14 +638,14 @@ def get_bot_comment_score(reddit, subreddit_name, days_to_check=30):
                 total_score += comment.score
                 comment_count += 1
 
-        print(f"\n    📈 Summary for r/{subreddit_name}:")
-        print(f"      - Total comments found: {comment_count}")
-        print(f"      - Total score: {total_score:+}")
-        print(f"      - Average score per comment: {(total_score/comment_count if comment_count else 0):+.2f}")
+        print(f"\n📈 Summary for r/{subreddit_name}:")
+        print(f"  - Total comments found: {comment_count}")
+        print(f"  - Total score: {total_score:+}")
+        print(f"  - Average score per comment: {(total_score/comment_count if comment_count else 0):+.2f}")
         
         return total_score, comment_count
     except Exception as e:
-        print(f"    ⚠️ Error fetching bot comments for r/{subreddit_name}: {e}")
+        print(f"⚠️ Error fetching bot comments for r/{subreddit_name}: {e}")
         return 0, 0
 
 if __name__ == "__main__":
@@ -655,7 +656,7 @@ if __name__ == "__main__":
 
     # Display the bot's total comment karma once at the start
     bot_user = reddit.redditor(REDDIT_USERNAME)
-    print(f"    🔍 Bot's total comment karma: {bot_user.comment_karma}")
+    print(f"\n✨ Bot's total comment karma: {bot_user.comment_karma}\n")
 
     subreddit_info = get_subreddit_info_from_database()
 
@@ -666,7 +667,7 @@ if __name__ == "__main__":
         for subreddit_name, last_post_checked in subreddit_info.items():
             # Calculate the bot's overall score in the subreddit
             bot_score = get_bot_comment_score(reddit, subreddit_name)
-            print(f"\nScanning r/{subreddit_name}...")
+            print(f"\n🔍 Scanning r/{subreddit_name}...")
 
             new_last_post_checked = process_subreddit(reddit, subreddit_name, last_post_checked)
             update_last_post_checked(subreddit_name, new_last_post_checked)
@@ -681,8 +682,8 @@ if __name__ == "__main__":
             rhours, rremainder = divmod(reddit_elapsed_time, 3600)
             rminutes, rseconds = divmod(rremainder, 60)
 
-            print(f"  ✅ Finished scanning r/{subreddit_name}. Time taken to scan: {int(rhours)}h {int(rminutes)}m {rseconds:.2f}s")
-            print(f"  🕒 Total time taken: {int(hours)}h {int(minutes)}m {seconds:.2f}s")
+            print(f"✅ Finished scanning r/{subreddit_name}. Time taken to scan: {int(rhours)}h {int(rminutes)}m {rseconds:.2f}s")
+            print(f"🕒 Total time taken: {int(hours)}h {int(minutes)}m {seconds:.2f}s")
 
             reddit_time = time.time()  # Reset the Reddit scan timer for the next subreddit
 
