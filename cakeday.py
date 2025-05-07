@@ -146,20 +146,16 @@ def post_cake_day_comment(reddit_obj, target_obj, gemini_message, max_retries=3,
             print(f"    🔗 URL: http://reddit.com{target_obj.permalink}\n")
             return True
 
-        except prawcore.exceptions.RateLimitExceeded as e:
-            # Handle rate limiting with exponential backoff
-            if attempt < max_retries - 1:
+        except prawcore.exceptions.Forbidden as e:
+            # Check if it's a rate limit error (403)
+            if "RATELIMIT" in str(e).upper() and attempt < max_retries - 1:
                 delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
                 print(f"    ⚠️ Rate limit exceeded. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
                 time.sleep(delay)
             else:
-                print(f"    ❌ Failed to post comment after {max_retries} attempts due to rate limiting")
+                # Handle other Forbidden errors (e.g., banned from subreddit)
+                print(f"    ❌ Forbidden error: Bot may be banned from this subreddit - {str(e)}")
                 return False
-
-        except prawcore.exceptions.Forbidden as e:
-            # Handle permission errors (e.g., banned from subreddit)
-            print(f"    ❌ Forbidden error: Bot may be banned from this subreddit - {str(e)}")
-            return False
 
         except prawcore.exceptions.ServerError as e:
             # Handle Reddit server errors
@@ -536,26 +532,26 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None):
 
         # Construct the Gemini prompt
         gemini_message_prompt = f"""
-        You are a Reddit bot that celebrates users' Cake Days. Your goal is to craft a clever or witty, but most important: in-context, cake day wish for a user based on the surrounding conversation in a Reddit thread.
-        
-        Here is the information about the context:
+            You are a Reddit bot that celebrates users' Cake Days. Your goal is to craft a thoughtful and relevant cake day wish for a user based on the surrounding conversation in a Reddit thread. Avoid overly quirky or exaggerated humor. Aim for a tone that is friendly, conversational, and appropriate for the subreddit.
 
-        Subreddit: r/{subreddit_name}
-        Post Title: {post_title if post_title else item.title}
-        Relevant Comment Chain:
-        {comment_chain_context}
+            Here is the information about the context:
 
-        Sentiment Analysis:
-        - Average Sentiment Score: {average_sentiment_score:.2f} (Sentiment range is -1 to 1, -1 being very negative and 1 being very positive)
-        - Most Extreme Sentiment: {most_extreme_sentiment["sentiment"]} (Text: "{most_extreme_sentiment["text"]}")
-        - Sentiment Trend: {sentiment_trend}
+            Subreddit: r/{subreddit_name}
+            Post Title: {post_title if post_title else item.title}
+            Relevant Comment Chain:
+            {comment_chain_context}
 
-        The user celebrating their Cake Day is "{item.author.name}". The user is {account_age_years} year{"s" if account_age_years > 1 else ""} old. Include their age somewhere in the cake day wish. This user is the {'post author' if item_type == 'post' else 'comment author'}.
-        Craft a cake day wish for "{item.author.name}" that is relevant to the topic and tone of the post title and the surrounding comments. Use the sentiment analysis (average sentiment, most extreme sentiment, and sentiment trend) to guide the tone of your message.
-        Also, consider the Reddit score of the post/comments when generating the message. High scoring posts/comments are generally well-received by the community.
+            Sentiment Analysis:
+            - Average Sentiment Score: {average_sentiment_score:.2f} (Sentiment range is -1 to 1, -1 being very negative and 1 being very positive)
+            - Most Extreme Sentiment: {most_extreme_sentiment["sentiment"]} (Text: "{most_extreme_sentiment["text"]}")
+            - Sentiment Trend: {sentiment_trend}
 
-        Your response should *only* be the cake day wish text, suitable for posting as a reply to the {'post' if item_type == 'post' else 'comment'}.
-        """
+            The user celebrating their Cake Day is "{item.author.name}". The user is {account_age_years} year{"s" if account_age_years > 1 else ""} old. Include their age somewhere in the cake day wish, if appropriate. This user is the {'post author' if item_type == 'post' else 'comment author'}.
+
+            Craft a cake day wish for "{item.author.name}" that acknowledges their cake day and relates to the topic and tone of the post and comments. Use the sentiment analysis to inform the tone of your message. If the overall sentiment is negative, offer a message of support or levity rather than forced cheerfulness. Consider the Reddit score of the post/comments; high scoring posts/comments are generally well-received.
+
+            Your response should *only* be the cake day wish text, suitable for posting as a reply to the {'post' if item_type == 'post' else 'comment'}. Use Reddit formatting where appropriate (e.g., italics, bold). Be creative and find different ways to express the cake day wish, don't always default to "Happy Cake Day".
+            """
 
         # Call Gemini API to generate the message
         print(f"""    
