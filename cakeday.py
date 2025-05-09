@@ -407,7 +407,7 @@ def generate_cake_day_message(client, prompt, max_retries=3, initial_delay=1):
 
     return "Happy Cake Day! 🎂"  # Final fallback if all retries fail
 
-def process_item(reddit, item, item_type, subreddit_name, post_title=None):
+def process_item(reddit, item, item_type, subreddit_name, post_title=None, bot_performance=None):
     """
     Processes a Reddit item (Post or Comment) to check for Cake Day and post a message.
 
@@ -417,6 +417,7 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None):
         item_type: A string indicating the item type ('post' or 'comment').
         subreddit_name: The name of the subreddit.
         post_title: The title of the post (only applicable for comments).
+        bot_performance: Tuple containing (total_score, comment_count) for bot's performance.
     """
     if item.author and is_cake_day(reddit, item.author.name):
         account_creation_date = datetime.fromtimestamp(reddit.redditor(item.author.name).created_utc, timezone.utc)
@@ -530,7 +531,11 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None):
         most_extreme_sentiment = max(comment_chain_context, key=lambda x: abs(analyzer.polarity_scores(x["text"])["compound"]))
         sentiment_trend = "positive" if average_sentiment_score > 0 else "negative" if average_sentiment_score < 0 else "neutral"
 
-        # Construct the Gemini prompt
+        # Construct the Gemini prompt with bot performance data
+        bot_total_score = bot_performance[0] if bot_performance else 0
+        bot_comment_count = bot_performance[1] if bot_performance else 0
+        bot_karma = (bot_total_score / bot_comment_count) if bot_comment_count > 0 else 0
+
         gemini_message_prompt = f"""
             You are a Reddit bot that celebrates users' Cake Days. Your goal is to craft a thoughtful and relevant cake day wish for a user based on the surrounding conversation in a Reddit thread. Avoid overly quirky or exaggerated humor. Aim for a tone that is friendly, conversational, and appropriate for the subreddit.
 
@@ -546,17 +551,32 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None):
             - Most Extreme Sentiment: {most_extreme_sentiment["sentiment"]} (Text: "{most_extreme_sentiment["text"]}")
             - Sentiment Trend: {sentiment_trend}
 
-            The user celebrating their Cake Day is "{item.author.name}". The user is {account_age_years} year{"s" if account_age_years > 1 else ""} old. Include their age somewhere in the cake day wish, if appropriate. This user is the {'post author' if item_type == 'post' else 'comment author'}.
+            The user celebrating their Cake Day is "{item.author.name}". The user is {account_age_years} year{"s" if account_age_years > 1 else ""} old. Include their age somewhere in the cake day wish, if appropriate, but avoid phrases that directly connect their age on Reddit with their current activity or the post's topic. For example, do not say things like "[age] years on Reddit, and you're already [pondering/wondering/etc.]".
 
-            Craft a cake day wish for "{item.author.name}" that acknowledges their cake day and relates to the topic and tone of the post and comments. Use the sentiment analysis to inform the tone of your message. If the overall sentiment is negative, offer a message of support or levity rather than forced cheerfulness. Consider the Reddit score of the post/comments; high scoring posts/comments are generally well-received.
+            Craft a cake day wish for "{item.author.name}" that acknowledges their cake day. Use the sentiment analysis to inform the tone of your message. If the overall sentiment is negative, offer a message of support or levity rather than forced cheerfulness. Consider the Reddit score of the post/comments; high scoring posts/comments are generally well-received.
 
-            Your response should *only* be the cake day wish text, suitable for posting as a reply to the {'post' if item_type == 'post' else 'comment'}. Use Reddit formatting where appropriate (e.g., italics, bold). Be creative and find different ways to express the cake day wish, don't always default to "Happy Cake Day".
-            """
+            Your response should *only* be the cake day wish text, suitable for posting as a reply to the {'post' if item_type == 'post' else 'comment'}. Use Reddit formatting where appropriate (e.g., italics, bold). """
 
+        # Tone Adjustment Based on Bot Karma (Using Karma Bands from the document):
+        reddit_karma = ""
+        if bot_karma < 1:
+            reddit_karma = "low"
+            gemini_message_prompt += f"""Your karma is low in r/{subreddit_name}. Use a strictly polite, neutral, and unobtrusive tone. Avoid any slang, humor, or embellishments. Ignore the context of the Relevant Comment Chain and keep the message very concise."""
+        elif 1 <= bot_karma < 3:
+            reddit_karma = "neutral"
+            gemini_message_prompt += f"""Your karma is neutral r/{subreddit_name}. Use a polite and slightly warmer tone. A simple, positive emoji is acceptable. Keep the message concise. Use the context found in Relevant Comment Chain to inform your message."""
+        elif 3 <= bot_karma < 5:
+            reddit_karma = "slightly positive"
+            gemini_message_prompt += f"""Your karma is slightly positive r/{subreddit_name}. Use a friendly and warm tone. Use a genuinely enthusiastic, warm, and celebratory tone. A few emojis are acceptable too. Use the context found in Relevant Comment Chain to inform your message. You may include a very short, positive, Reddit fun fact that is relevant to the context found in Relevant Comment Chain."""
+        elif 5 <= bot_karma < 10:
+            reddit_karma = "highly positive"
+            gemini_message_prompt += f"""Your karma is highly positive r/{subreddit_name}. Use a celebratory tone, perhaps with a touch of light, widely understandable humor or a unique, positive flourish. Be creative, but avoid anything controversial. Use the context found in Relevant Comment Chain to inform your message."""
+       
         # Call Gemini API to generate the message
         print(f"""    
             Subreddit: r/{subreddit_name}
             Post Title: {post_title if post_title else item.title}
+            Bot Karma: {reddit_karma}
             Relevant Comment Chain:\n
               {comment_chain_context}\n
             Sentiment Analysis:
@@ -577,7 +597,19 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None):
         return True  # Indicate that a Cake Day was found
     return False  # Indicate no Cake Day was found
 
-def process_subreddit(reddit, subreddit_name, last_post_checked):
+def process_subreddit(reddit, subreddit_name, last_post_checked, bot_score):
+    """
+    Processes a subreddit looking for users celebrating their Cake Day.
+
+    Args:
+        reddit: The PRAW Reddit instance.
+        subreddit_name: The name of the subreddit to process.
+        last_post_checked: The ID of the last post that was checked.
+        bot_score: Tuple containing (total_score, comment_count) for bot's performance in this subreddit.
+
+    Returns:
+        str: The ID of the newest post checked in this scan.
+    """
     subreddit = reddit.subreddit(subreddit_name)
     new_last_post_checked = None  # Initialize as None
     cake_day_count = 0  # Counter for cake days found
@@ -594,18 +626,18 @@ def process_subreddit(reddit, subreddit_name, last_post_checked):
 
         if post.author:
             print(f"  Checking post: '{post.title}' by {post.author.name} with {post.num_comments} comments. Please stand by...")
-            if process_item(reddit, post, "post", subreddit_name):
+            if process_item(reddit, post, "post", subreddit_name, bot_performance=bot_score):  # Use bot_score passed from main loop
                 cake_day_count += 1  # Increment only if a Cake Day was found
             time.sleep(API_CALL_DELAY)  # Be mindful of rate limits
 
         post.comments.replace_more(limit=None)  # Load all top-level comments
         for comment in post.comments.list():
             if comment.author:
-                if process_item(reddit, comment, "comment", subreddit_name, post.title):
+                if process_item(reddit, comment, "comment", subreddit_name, post.title, bot_performance=bot_score):  # Use bot_score passed from main loop
                     cake_day_count += 1  # Increment only if a Cake Day was found
                 time.sleep(API_CALL_DELAY)
 
-    print(f"🎉 Total Cake Days found in r/{subreddit_name}: {cake_day_count} {"" if cake_day_count == 0 else "🎉🎉"}")
+    print(f"\n🎉 Total Cake Days found in r/{subreddit_name}: {cake_day_count} {"" if cake_day_count == 0 else "🎉🎉"}")
     return new_last_post_checked
 
 def get_bot_comment_score(reddit, subreddit_name, days_to_check=30):
@@ -637,7 +669,7 @@ def get_bot_comment_score(reddit, subreddit_name, days_to_check=30):
         print(f"\n📈 Summary for r/{subreddit_name}:")
         print(f"  - Total comments found: {comment_count}")
         print(f"  - Total score: {total_score:+}")
-        print(f"  - Average score per comment: {(total_score/comment_count if comment_count else 0):+.2f}")
+        print(f"  - Average score per comment: {(total_score/comment_count if comment_count else 0):+.2f}\n")
         
         return total_score, comment_count
     except Exception as e:
@@ -661,11 +693,11 @@ if __name__ == "__main__":
     else:
         print("Scanning subreddits for Cake Days...")
         for subreddit_name, last_post_checked in subreddit_info.items():
-            # Calculate the bot's overall score in the subreddit
-            bot_score = get_bot_comment_score(reddit, subreddit_name)
+            # Calculate the bot's overall score in the subreddit once per subreddit
             print(f"\n🔍 Scanning r/{subreddit_name}...")
+            bot_score = get_bot_comment_score(reddit, subreddit_name)
 
-            new_last_post_checked = process_subreddit(reddit, subreddit_name, last_post_checked)
+            new_last_post_checked = process_subreddit(reddit, subreddit_name, last_post_checked, bot_score)
             update_last_post_checked(subreddit_name, new_last_post_checked)
             update_scan_time(subreddit_name)
 
