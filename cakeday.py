@@ -559,16 +559,16 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None, bot_p
 
         # Tone Adjustment Based on Bot Karma (Using Karma Bands from the document):
         reddit_karma = ""
-        if bot_karma < 1:
+        if bot_karma < 1 and bot_comment_count > 0:
             reddit_karma = "low"
             gemini_message_prompt += f"""Your karma is low in r/{subreddit_name}. Use a strictly polite, neutral, and unobtrusive tone. Avoid any slang, humor, or embellishments. Ignore the context of the Relevant Comment Chain and keep the message very concise."""
-        elif 1 <= bot_karma < 3:
+        elif 1 <= bot_karma < 3 or bot_comment_count == 0:
             reddit_karma = "neutral"
             gemini_message_prompt += f"""Your karma is neutral r/{subreddit_name}. Use a polite and slightly warmer tone. A simple, positive emoji is acceptable. Keep the message concise. Use the context found in Relevant Comment Chain to inform your message."""
         elif 3 <= bot_karma < 5:
             reddit_karma = "slightly positive"
-            gemini_message_prompt += f"""Your karma is slightly positive r/{subreddit_name}. Use a friendly and warm tone. Use a genuinely enthusiastic, warm, and celebratory tone. A few emojis are acceptable too. Use the context found in Relevant Comment Chain to inform your message. You may include a very short, positive, Reddit fun fact that is relevant to the context found in Relevant Comment Chain."""
-        elif 5 <= bot_karma < 10:
+            gemini_message_prompt += f"""Your karma is slightly positive r/{subreddit_name}. Use a friendly and warm tone. Use a genuinely enthusiastic, warm, and celebratory tone. A few emojis are acceptable too. Use the context found in Relevant Comment Chain to inform your message. If applicable, you may include a very short, positive, fun fact that is relevant to the context found in Relevant Comment Chain."""
+        elif 5 <= bot_karma:
             reddit_karma = "highly positive"
             gemini_message_prompt += f"""Your karma is highly positive r/{subreddit_name}. Use a celebratory tone, perhaps with a touch of light, widely understandable humor or a unique, positive flourish. Be creative, but avoid anything controversial. Use the context found in Relevant Comment Chain to inform your message."""
        
