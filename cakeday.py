@@ -437,7 +437,7 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None, bot_p
 
                 # Fetch up to 5 parent comments
                 while parent and len(parent_chain) < 5:
-                    parent_text = parent.body[:250] if hasattr(parent, "body") else (parent.selftext[:250] if hasattr(parent, "selftext") else "(no text content)")
+                    parent_text = parent.body[:500] if hasattr(parent, "body") else (parent.selftext[:250] if hasattr(parent, "selftext") else "(no text content)")
                     parent_sentiment = analyze_sentiment(parent_text)
                     parent_chain.insert(0, {  # Insert at the beginning to maintain order
                         "author": parent.author.name if parent.author else "[deleted]",
@@ -454,7 +454,7 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None, bot_p
                 comment_chain_context.extend(parent_chain)
 
                 # Add the current comment
-                current_text = item.body[:250]
+                current_text = item.body[:500]
                 current_sentiment = analyze_sentiment(current_text)
                 comment_chain_context.append({
                     "author": item.author.name,
@@ -470,7 +470,7 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None, bot_p
                 siblings = item.parent().replies if hasattr(item.parent(), "replies") else []
                 for sibling in siblings:
                     if sibling != item and len(sibling_chain) < 5:
-                        sibling_text = sibling.body[:250] if hasattr(sibling, "body") else "(no text content)"
+                        sibling_text = sibling.body[:500] if hasattr(sibling, "body") else "(no text content)"
                         sibling_sentiment = analyze_sentiment(sibling_text)
                         sibling_chain.append({
                             "author": sibling.author.name if sibling.author else "[deleted]",
@@ -487,7 +487,7 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None, bot_p
 
             elif item_type == "post":
                 # Add the post's selftext as the first item in the context
-                post_text = item.selftext[:250] if item.selftext else "(no text content)"
+                post_text = item.selftext[:500] if item.selftext else "(no text content)"
                 post_sentiment = analyze_sentiment(post_text)
                 comment_chain_context.append({
                     "author": item.author.name,
@@ -503,7 +503,7 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None, bot_p
                 submission = item
                 submission.comments.replace_more(limit=None)  # Load all top-level comments
                 for comment in submission.comments[:10]:  # Limit to 10 comments
-                    comment_text = comment.body[:250] if hasattr(comment, "body") else "(no text content)"
+                    comment_text = comment.body[:500] if hasattr(comment, "body") else "(no text content)"
                     comment_sentiment = analyze_sentiment(comment_text)
                     comment_data = {
                         "author": comment.author.name if comment.author else "[deleted]",
@@ -537,46 +537,98 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None, bot_p
         bot_karma = (bot_total_score / bot_comment_count) if bot_comment_count > 0 else 0
 
         gemini_message_prompt = f"""
-            You are a Reddit bot that celebrates users' Cake Days. Your goal is to craft a thoughtful and relevant cake day wish for a user based on the surrounding conversation in a Reddit thread. Avoid overly quirky or exaggerated humor. Aim for a tone that is friendly, conversational, and appropriate for the subreddit.
+You are a Reddit bot that celebrates users' Cake Days. Your goal is to craft a thoughtful and relevant message that fits naturally into the conversation. Keep responses concise and genuine.
 
-            Here is the information about the context:
+Context:
+Subreddit: r/{subreddit_name}
+Post Title: {post_title if post_title else item.title}
+Conversation Summary: {comment_chain_context}
 
-            Subreddit: r/{subreddit_name}
-            Post Title: {post_title if post_title else item.title}
-            Relevant Comment Chain:
-            {comment_chain_context}
+Sentiment Guide (Current conversation is {sentiment_trend}):
+- Average Sentiment: {average_sentiment_score:.2f} (-1 to +1)
+- Most Impactful Comment: "{most_extreme_sentiment["text"]}"
 
-            Sentiment Analysis:
-            - Average Sentiment Score: {average_sentiment_score:.2f} (Sentiment range is -1 to 1, -1 being very negative and 1 being very positive)
-            - Most Extreme Sentiment: {most_extreme_sentiment["sentiment"]} (Text: "{most_extreme_sentiment["text"]}")
-            - Sentiment Trend: {sentiment_trend}
+Content Status:
+- {item_type.capitalize()} Karma: {item.score}
+- Visibility: {'Low' if item.score < 1 else 'Normal' if item.score < 10 else 'High'}
 
-            The user celebrating their Cake Day is "{item.author.name}". The user is {account_age_years} year{"s" if account_age_years > 1 else ""} old. Include their age somewhere in the cake day wish, if appropriate, but avoid phrases that directly connect their age on Reddit with their current activity or the post's topic. For example, do not say things like "[age] years on Reddit, and you're already [pondering/wondering/etc.]".
+About the User:
+- Username: {item.author.name}
+- Account Age: {account_age_years} year{"s" if account_age_years > 1 else ""}
+- Activity Type: {'Post' if item_type == 'post' else 'Comment'}
 
-            Craft a cake day wish for "{item.author.name}" that acknowledges their cake day. Use the sentiment analysis to inform the tone of your message. If the overall sentiment is negative, offer a message of support or levity rather than forced cheerfulness. Consider the Reddit score of the post/comments; high scoring posts/comments are generally well-received.
+Performance Metrics:
+- Bot's Average Karma: {bot_karma:.2f}
+- Previous Interactions: {bot_comment_count}
+Message Guidelines Based on Performance:"""
 
-            Your response should *only* be the cake day wish text, suitable for posting as a reply to the {'post' if item_type == 'post' else 'comment'}. Use Reddit formatting where appropriate (e.g., italics, bold). """
+        # Note: Remove the existing karma bands and replace with this more specific guidance
+        if bot_karma < 0 or item.score < 1:
+            gemini_message_prompt += f"""
+    IMPORTANT: Previous responses were not well-received in r/{subreddit_name}.
+    - Study the conversation carefully before responding
+    - Match the subreddit's general tone and style
+    - Keep the message brief but relevant to the discussion
+    - Avoid standing out as a bot
+    - If the conversation is technical/serious, be professional
+    - If the conversation is casual, be natural but understated
+    - Only use emojis if they appear in other comments
+    - Priority: Blend in > Celebrate"""
+        elif bot_karma == 0 or bot_comment_count == 0:
+            gemini_message_prompt += f"""
+    IMPORTANT: First interaction in r/{subreddit_name}
+    - Study the provided conversation context carefully
+    - Keep message very brief (1 short sentence)
+    - Make the response specifically relevant to the current discussion
+    - Match the tone and vocabulary of other comments
+    - For technical/professional discussions, maintain formality
+    - Avoid standing out as a bot
+    - Only use emoji if present in other comments
+    - Priority: Relevance > Celebration"""
+        elif 0 < bot_karma < 3:
+            gemini_message_prompt += f"""
+    IMPORTANT: Slowly building acceptance in r/{subreddit_name}
+    - Study the conversation context and identify the main topic/theme
+    - Keep message concise (2 sentences maximum)
+    - Make one specific reference to the ongoing discussion
+    - Match the community's vocabulary and terminology
+    - If the conversation is lighthearted, match that energy
+    - If the conversation is serious, maintain professionalism
+    - Only use emoji if others are using them
+    - For specialty subreddits, demonstrate topic understanding
+    - Priority: Add Value > Celebrate > Stand Out"""
+        else:
+            gemini_message_prompt += f"""
+    IMPORTANT: Strong acceptance in r/{subreddit_name}
+    - Study the conversation context for key themes and terminology
+    - Message length: 2-3 concise sentences
+    - Make a meaningful contribution to the discussion
+    - Include ONE of the following if relevant:
+      * A brief, interesting fact related to the conversation
+      * A thoughtful observation about the discussion
+      * A gentle humorous reference (if tone appropriate)
+    - Use subreddit-specific language/terms if present
+    - Match the energy level of highly-upvoted comments
+    - If technical subreddit, demonstrate subject knowledge
+    - Emojis allowed if fitting the community style
+    - Priority: Add Value = Celebrate > Entertain"""
 
-        # Tone Adjustment Based on Bot Karma (Using Karma Bands from the document):
-        reddit_karma = ""
-        if bot_karma < 1 and bot_comment_count > 0:
-            reddit_karma = "low"
-            gemini_message_prompt += f"""Your karma is low in r/{subreddit_name}. Use a strictly polite, neutral, and unobtrusive tone. Avoid any slang, humor, or embellishments. Ignore the context of the Relevant Comment Chain and keep the message very concise."""
-        elif 1 <= bot_karma < 3 or bot_comment_count == 0:
-            reddit_karma = "neutral"
-            gemini_message_prompt += f"""Your karma is neutral r/{subreddit_name}. Use a polite and slightly warmer tone. A simple, positive emoji is acceptable. Keep the message concise. Use the context found in Relevant Comment Chain to inform your message."""
-        elif 3 <= bot_karma < 5:
-            reddit_karma = "slightly positive"
-            gemini_message_prompt += f"""Your karma is slightly positive r/{subreddit_name}. Use a friendly and warm tone. Use a genuinely enthusiastic, warm, and celebratory tone. A few emojis are acceptable too. Use the context found in Relevant Comment Chain to inform your message. If applicable, you may include a very short, positive, fun fact that is relevant to the context found in Relevant Comment Chain."""
-        elif 5 <= bot_karma:
-            reddit_karma = "highly positive"
-            gemini_message_prompt += f"""Your karma is highly positive r/{subreddit_name}. Use a celebratory tone, perhaps with a touch of light, widely understandable humor or a unique, positive flourish. Be creative, but avoid anything controversial. Use the context found in Relevant Comment Chain to inform your message."""
-       
+        gemini_message_prompt += """
+
+Response Requirements:
+1. Match the tone of the conversation
+2. Keep the cake day wish natural and understated
+3. Avoid forced references to account age
+4. Use Reddit formatting (bold, italics) sparingly
+5. If sentiment is negative, be supportive rather than celebratory
+
+Your response should be only the cake day message, ready to post as a comment."""
+
         # Call Gemini API to generate the message
         print(f"""    
             Subreddit: r/{subreddit_name}
             Post Title: {post_title if post_title else item.title}
-            Bot Karma: {reddit_karma}
+            Bot Karma: {bot_karma:.2f}
             Relevant Comment Chain:\n
               {comment_chain_context}\n
             Sentiment Analysis:
