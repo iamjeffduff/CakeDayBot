@@ -5,9 +5,18 @@ import time
 from google import genai  # Import the genai library
 from pytz import timezone as pytz_timezone  # Rename pytz's timezone to avoid conflicts
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer  # Import sentiment analyzer
-from config import CLIENT_ID, CLIENT_SECRET, USER_AGENT, REDDIT_USERNAME, REDDIT_PASSWORD, DATABASE_NAME, API_CALL_DELAY, GEMINI_API_KEY  # Import global variables
+from config import CLIENT_ID, CLIENT_SECRET, USER_AGENT, REDDIT_USERNAME, REDDIT_PASSWORD, DATABASE_NAME, API_CALL_DELAY, GEMINI_API_KEY, GEMINI_MODELS  # Add GEMINI_MODELS
 import prawcore
 import random
+from models import Database, SubredditManager, WishedUsersManager
+
+# Initialize database and manager instances
+db = Database(DATABASE_NAME)
+subreddit_mgr = SubredditManager(db)
+wished_users_mgr = WishedUsersManager(db)
+
+# Global variable to track current Gemini model index
+current_gemini_model_index = 0
 
 def adapt_date(date_obj):
     return date_obj.isoformat()  # Convert date to ISO 8601 string
@@ -78,48 +87,62 @@ def get_reddit_instance(max_retries=3, initial_delay=1):
     raise Exception(f"Failed to initialize Reddit client after {max_retries} attempts")
 
 def get_gemini_client(max_retries=3, initial_delay=1):
-    """
-    Get a Gemini API client with retry logic for connection issues.
-
-    Args:
-        max_retries: Maximum number of retry attempts (default: 3)
-        initial_delay: Initial delay between retries in seconds (default: 1)
-
-    Returns:
-        genai.Client: A configured Gemini API client
-    """
+    """Get a Gemini API client with retry logic for connection issues."""
+    global current_gemini_model_index
     attempt = 0
+    
     while attempt < max_retries:
         try:
             client = genai.Client(api_key=GEMINI_API_KEY)
-            # Test the client with a simple request
-            client.models.list()
-            return client
-
-        except genai.AuthenticationError as e:
-            print(f"    ❌ Gemini API authentication error: Invalid API key")
-            raise  # Re-raise as this is a configuration issue that needs immediate attention
-
-        except genai.QuotaExceededError as e:
-            print(f"    ❌ Gemini API quota exceeded: {str(e)}")
-            raise  # Re-raise as retrying won't help with quota issues
-
-        except (genai.ServiceUnavailableError, genai.ConnectionError) as e:
-            if attempt < max_retries - 1:
-                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
-                print(f"    ⚠️ Gemini API connection error. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
-                time.sleep(delay)
-            else:
-                print(f"    ❌ Failed to connect to Gemini API after {max_retries} attempts: {str(e)}")
-                raise
+            
+            # Get current model from the list
+            if current_gemini_model_index >= len(GEMINI_MODELS):
+                print("    ❌ All models exhausted")
+                return None, None
+                
+            model_name = GEMINI_MODELS[current_gemini_model_index]
+            
+            # Test the connection
+            response = client.models.generate_content(
+                model=model_name,
+                contents="test"
+            )
+            
+            if response and hasattr(response, 'text'):
+                return client, model_name
+            
+            print("    ❌ Error: Empty or invalid response from Gemini API")
+            return None, None
 
         except Exception as e:
-            print(f"    ❌ Unexpected error connecting to Gemini API: {str(e)}")
-            raise
+            error_code = getattr(e, 'code', None) 
+            if error_code == 401:  # Unauthorized
+                print(f"    ❌ Authentication error: Invalid API key")
+                return None, None
+                
+            if error_code in (429, 503):  # Rate limit or Service unavailable
+                current_gemini_model_index += 1
+                print(f"    ⚠️ Service {error_code}, switching to model: {GEMINI_MODELS[current_gemini_model_index] if current_gemini_model_index < len(GEMINI_MODELS) else 'None'}")
+                continue
+
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"    ⚠️ API error. Retrying in {delay:.2f}s... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+            else:
+                # After 3 attempts, try the next model
+                current_gemini_model_index += 1
+                if current_gemini_model_index < len(GEMINI_MODELS):
+                    print(f"    ⚠️ Failed after {max_retries} attempts, switching to model: {GEMINI_MODELS[current_gemini_model_index]}")
+                    attempt = 0  # Reset attempts for the new model
+                    continue
+                else:
+                    print(f"    ❌ All models exhausted after retries")
+                    return None, None
 
         attempt += 1
-
-    raise Exception(f"Failed to initialize Gemini client after {max_retries} attempts")
+    
+    return None, None
 
 def post_cake_day_comment(reddit_obj, target_obj, gemini_message, max_retries=3, initial_delay=1):
     """
@@ -192,127 +215,9 @@ def _get_title_context(context_type, post_title):
     else:
         return f"The post is titled '{post_title}'. "
 
-def execute_db_operation(operation, params=None, max_retries=3, initial_delay=1):
-    """
-    Execute a database operation with retry logic.
-    
-    Args:
-        operation: SQL query to execute
-        params: Parameters for the SQL query
-        max_retries: Maximum number of retry attempts
-        initial_delay: Initial delay between retries in seconds
-        
-    Returns:
-        tuple: (success, result) where success is a boolean and result is the query result or None
-    """
-    attempt = 0
-    while attempt < max_retries:
-        try:
-            conn = sqlite3.connect(DATABASE_NAME, detect_types=sqlite3.PARSE_DECLTYPES, timeout=20)
-            cursor = conn.cursor()
-            
-            if params:
-                cursor.execute(operation, params)
-            else:
-                cursor.execute(operation)
-                
-            result = cursor.fetchall() if cursor.description else None
-            conn.commit()
-            conn.close()
-            return True, result
-            
-        except sqlite3.OperationalError as e:
-            if "database is locked" in str(e) and attempt < max_retries - 1:
-                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
-                print(f"    ⚠️ Database is locked. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
-                time.sleep(delay)
-            else:
-                print(f"    ❌ Database error: {str(e)}")
-                return False, None
-                
-        except sqlite3.IntegrityError as e:
-            print(f"    ❌ Database integrity error: {str(e)}")
-            return False, None
-            
-        except Exception as e:
-            print(f"    ❌ Unexpected database error: {str(e)}")
-            return False, None
-            
-        finally:
-            if 'conn' in locals():
-                try:
-                    conn.close()
-                except:
-                    pass
-                    
-        attempt += 1
-    
-    return False, None
-
-def mark_as_wished(username):
-    today = datetime.now().date().isoformat()
-    success, _ = execute_db_operation(
-        "INSERT OR REPLACE INTO wished_users (username, wished_date) VALUES (?, ?)",
-        (username, today)
-    )
-    return success
-
-def has_been_wished(username):
-    today = datetime.now().date()
-    success, result = execute_db_operation(
-        "SELECT wished_date FROM wished_users WHERE username = ?",
-        (username,)
-    )
-    
-    if not success or not result:
-        return False
-        
-    wished_date = result[0][0]
-    if isinstance(wished_date, str):
-        wished_date = datetime.strptime(wished_date, "%Y-%m-%d").date()
-        
-    if wished_date == today:
-        return True
-    else:
-        execute_db_operation(
-            "DELETE FROM wished_users WHERE username = ?",
-            (username,)
-        )
-        return False
-
-def clear_expired_wished_users():
-    today = datetime.now().date().isoformat()
-    success, _ = execute_db_operation(
-        "DELETE FROM wished_users WHERE wished_date < ?",
-        (today,)
-    )
-    return success
-
-def get_subreddit_info_from_database():
-    success, result = execute_db_operation(
-        "SELECT subreddit_name, last_post_checked FROM subreddits"
-    )
-    return {row[0]: row[1] for row in result} if success and result else {}
-
-def update_last_post_checked(subreddit_name, last_post_checked):
-    success, _ = execute_db_operation(
-        "UPDATE subreddits SET last_post_checked = ? WHERE subreddit_name = ?",
-        (last_post_checked, subreddit_name)
-    )
-    return success
-
-def update_scan_time(subreddit_name):
-    now_utc = datetime.now(timezone.utc)
-    timestamp_numeric = now_utc.timestamp()
-    success, _ = execute_db_operation(
-        "UPDATE subreddits SET last_scan_time = ? WHERE subreddit_name = ?",
-        (timestamp_numeric, subreddit_name)
-    )
-    return success
-
 def is_cake_day(reddit, username):
     try:
-        if has_been_wished(username):
+        if wished_users_mgr.has_been_wished(username):
             print(f"    ⏭️  Skipping {username}, already wished today.")
             return False
 
@@ -328,7 +233,7 @@ def is_cake_day(reddit, username):
             # Check if today is the exact anniversary of the account creation
             if (account_creation_time.month == now_local.month and
                 account_creation_time.day == now_local.day):
-                mark_as_wished(username)
+                wished_users_mgr.mark_as_wished(username)
                 return True
 
         return False
@@ -355,57 +260,25 @@ def analyze_sentiment(text):
     else:
         return "neutral"
 
-def generate_cake_day_message(client, prompt, max_retries=3, initial_delay=1):
-    """
-    Generate a cake day message using the Gemini API with retry logic.
-
-    Args:
-        client: The Gemini API client
-        prompt: The prompt to generate content from
-        max_retries: Maximum number of retry attempts (default: 3)
-        initial_delay: Initial delay between retries in seconds (default: 1)
-
-    Returns:
-        str: The generated message or a fallback message if all retries fail
-    """
-    attempt = 0
-    while attempt < max_retries:
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt,
-            )
+def generate_cake_day_message(client, model_name, prompt):
+    """Generate a cake day message using the Gemini API."""
+    try:
+        if not client or not model_name:
+            return "Happy Cake Day! 🎂"
+            
+        print(f"    🤖 Generating message with model: {model_name}")
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt
+        )
+        
+        if response and hasattr(response, 'text'):
             return response.text
-
-        except genai.RateLimitExceededError as e:
-            if attempt < max_retries - 1:
-                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
-                print(f"    ⚠️ Gemini API rate limit exceeded. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
-                time.sleep(delay)
-            else:
-                print(f"    ❌ Gemini API rate limit exceeded after {max_retries} attempts")
-                return "Happy Cake Day! 🎂"  # Fallback message
-
-        except genai.InvalidRequestError as e:
-            print(f"    ❌ Invalid request to Gemini API: {str(e)}")
-            return "Happy Cake Day! 🎂"  # Fallback for invalid requests
-
-        except (genai.ServiceUnavailableError, genai.ConnectionError) as e:
-            if attempt < max_retries - 1:
-                delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
-                print(f"    ⚠️ Gemini API connection error. Retrying in {delay:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
-                time.sleep(delay)
-            else:
-                print(f"    ❌ Gemini API connection error after {max_retries} attempts: {str(e)}")
-                return "Happy Cake Day! 🎂"  # Fallback message
-
-        except Exception as e:
-            print(f"    ❌ Unexpected error calling Gemini API: {str(e)}")
-            return "Happy Cake Day! 🎂"  # Fallback message
-
-        attempt += 1
-
-    return "Happy Cake Day! 🎂"  # Final fallback if all retries fail
+        
+    except Exception as e:
+        print(f"    ⚠️ Error generating message: {str(e)}")
+        
+    return "Happy Cake Day! 🎂"
 
 def process_item(reddit, item, item_type, subreddit_name, post_title=None, bot_performance=None):
     """
@@ -537,11 +410,12 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None, bot_p
         bot_karma = (bot_total_score / bot_comment_count) if bot_comment_count > 0 else 0
 
         gemini_message_prompt = f"""
-You are a Reddit bot that celebrates users' Cake Days. Your goal is to craft a thoughtful and relevant message that fits naturally into the conversation. Keep responses concise and genuine.
+You are an AI-powered Reddit bot that celebrates users' Cake Days. Your goal is to craft a thoughtful and relevant message that fits naturally into the conversation, being transparent about your AI nature only when contextually appropriate (e.g., in AI-related subreddits or discussions). Keep responses concise and genuine. The focus should be on the cake day.
 
 Context:
 Subreddit: r/{subreddit_name}
 Post Title: {post_title if post_title else item.title}
+Post Type: {item.post_hint if hasattr(item, "post_hint") else "text"}
 Conversation Summary: {comment_chain_context}
 
 Sentiment Guide (Current conversation is {sentiment_trend}):
@@ -564,22 +438,23 @@ Message Guidelines Based on Performance:"""
 
         # Note: Remove the existing karma bands and replace with this more specific guidance
         if bot_karma < 0 or item.score < 1:
-            gemini_message_prompt += f"""
+            gemini_message_prompt += f"""    
     IMPORTANT: Previous responses were not well-received in r/{subreddit_name}.
     - Study the conversation carefully before responding
     - Match the subreddit's general tone and style
     - Keep the message brief but relevant to the discussion
-    - Avoid standing out as a bot
-    - If the conversation is technical/serious, be professional
-    - If the conversation is casual, be natural but understated
+    - If in AI-related context, acknowledge it subtly if appropriate
+    - If conversation is technical/serious, be professional
+    - If conversation is casual, be natural but understated
     - Only use emojis if they appear in other comments
+    - For AI/ML subreddits or discussions, show understanding but stay humble
     - Priority: Blend in > Celebrate"""
         elif bot_karma == 0 or bot_comment_count == 0:
             gemini_message_prompt += f"""
     IMPORTANT: First interaction in r/{subreddit_name}
     - Study the provided conversation context carefully
     - Keep message very brief (1 short sentence)
-    - Make the response specifically relevant to the current discussion
+    - Make a meaningful contribution to the discussion
     - Match the tone and vocabulary of other comments
     - For technical/professional discussions, maintain formality
     - Avoid standing out as a bot
@@ -590,7 +465,7 @@ Message Guidelines Based on Performance:"""
     IMPORTANT: Slowly building acceptance in r/{subreddit_name}
     - Study the conversation context and identify the main topic/theme
     - Keep message concise (2 sentences maximum)
-    - Make one specific reference to the ongoing discussion
+    - Make a meaningful contribution to the discussion
     - Match the community's vocabulary and terminology
     - If the conversation is lighthearted, match that energy
     - If the conversation is serious, maintain professionalism
@@ -621,6 +496,12 @@ Response Requirements:
 3. Avoid forced references to account age
 4. Use Reddit formatting (bold, italics) sparingly
 5. If sentiment is negative, be supportive rather than celebratory
+6. Context-sensitive AI awareness:
+   - If in AI/ML subreddits: Show understanding but stay humble
+   - If post is about AI: Acknowledge the shared interest naturally
+   - If post contains AI-generated content: Relate thoughtfully if appropriate
+   - In non-AI contexts: Focus on the cake day and conversation topic
+7. Never explicitly state "I am an AI" unless the context strongly warrants it
 
 Your response should be only the cake day message, ready to post as a comment."""
 
@@ -638,11 +519,16 @@ Your response should be only the cake day message, ready to post as a comment.""
         """)
 
         try:
-            client = get_gemini_client()
-            gemini_message = generate_cake_day_message(client, gemini_message_prompt)
+            client, model_name = get_gemini_client()
+            if client and model_name:
+                print(f"    🤖 Using Gemini Model: {model_name}")
+                gemini_message = generate_cake_day_message(client, model_name, gemini_message_prompt)
+            else:
+                print("    ⚠️ Failed to initialize Gemini client, using fallback message")
+                gemini_message = "Happy Cake Day! 🎂"
         except Exception as e:
-            print(f"    ⚠️ Failed to generate message using Gemini API, using fallback: {str(e)}")
-            gemini_message = "Happy Cake Day! 🎂"  # Ultimate fallback message
+            print(f"    ⚠️ Failed to generate message using Gemini API: {str(e)}")
+            gemini_message = "Happy Cake Day! 🎂"
 
         # Post the Cake Day wish
         post_cake_day_comment(reddit, item, gemini_message)
@@ -729,42 +615,15 @@ def get_bot_comment_score(reddit, subreddit_name, days_to_check=30):
         return 0, 0
 
 if __name__ == "__main__":
-    clear_expired_wished_users()  # Clear expired wished users at the start
-    start_time = time.time()  # Store the start timestamp
-    reddit_time = time.time()  # Store the start timestamp to time each reddit scan
+    # Initialize Reddit instance
     reddit = get_reddit_instance()
-
-    # Display the bot's total comment karma once at the start
-    bot_user = reddit.redditor(REDDIT_USERNAME)
-    print(f"\n✨ Bot's total comment karma: {bot_user.comment_karma}\n")
-
-    subreddit_info = get_subreddit_info_from_database()
-
-    if not subreddit_info:
-        print("No subreddits found in the database.")
-    else:
-        print("Scanning subreddits for Cake Days...")
-        for subreddit_name, last_post_checked in subreddit_info.items():
-            # Calculate the bot's overall score in the subreddit once per subreddit
-            print(f"\n🔍 Scanning r/{subreddit_name}...")
-            bot_score = get_bot_comment_score(reddit, subreddit_name)
-
-            new_last_post_checked = process_subreddit(reddit, subreddit_name, last_post_checked, bot_score)
-            update_last_post_checked(subreddit_name, new_last_post_checked)
-            update_scan_time(subreddit_name)
-
-            # Calculate and print elapsed time
-            total_elapsed_time = time.time() - start_time
-            hours, remainder = divmod(total_elapsed_time, 3600)
-            minutes, seconds = divmod(remainder, 60)
-
-            reddit_elapsed_time = time.time() - reddit_time
-            rhours, rremainder = divmod(reddit_elapsed_time, 3600)
-            rminutes, rseconds = divmod(rremainder, 60)
-
-            print(f"✅ Finished scanning r/{subreddit_name}. Time taken to scan: {int(rhours)}h {int(rminutes)}m {rseconds:.2f}s")
-            print(f"🕒 Total time taken: {int(hours)}h {int(minutes)}m {seconds:.2f}s")
-
-            reddit_time = time.time()  # Reset the Reddit scan timer for the next subreddit
-
-    print("\nScan complete.")
+    
+    wished_users_mgr.clear_expired()
+    subreddit_info = subreddit_mgr.get_info()
+    
+    for subreddit_name, (last_post_checked, last_scan_time) in subreddit_info.items():
+        print(f"\n🔍 Processing r/{subreddit_name}")
+        bot_score = get_bot_comment_score(reddit, subreddit_name)
+        new_last_post_checked = process_subreddit(reddit, subreddit_name, last_post_checked, bot_score)
+        subreddit_mgr.update_last_post_checked(subreddit_name, new_last_post_checked)
+        subreddit_mgr.update_scan_time(subreddit_name)
