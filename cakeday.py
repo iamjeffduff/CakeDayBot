@@ -482,6 +482,7 @@ Message Guidelines Based on Performance:"""
       * A brief, interesting fact related to the conversation
       * A thoughtful observation about the discussion
       * A gentle humorous reference (if tone appropriate)
+      * A fun birthday quote from someone famous that is relevant to the conversation
     - Use subreddit-specific language/terms if present
     - Match the energy level of highly-upvoted comments
     - If technical subreddit, demonstrate subject knowledge
