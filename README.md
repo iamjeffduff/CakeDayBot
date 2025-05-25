@@ -9,6 +9,63 @@ CakeDayBot is a Reddit bot designed to celebrate users' Cake Days by posting per
 - Tracks users who have already been wished to avoid duplicate messages.
 - Supports collaboration through suggestions for improvement.
 
+## Detailed Bot Functionality
+
+### 1. Image Processing
+- Intelligent image handling with automatic resizing limits
+- RGB conversion optimization for better performance
+- Smart image caching system to reduce API calls
+- Context-aware image processing for Gemini AI prompts
+- Support for multiple image types (direct, preview, gallery)
+
+### 2. Sentiment Analysis
+- Cached sentiment analysis to improve response time
+- Global sentiment cache with automatic cleanup
+- Intelligent cache TTL management
+- Thread-safe sentiment analysis operations
+
+### 3. Comment Management
+- Optimized comment loading with limit=0 for MoreComments
+- Smart filtering of top-level comments (limited to 50)
+- Efficient comment tree traversal
+- Cached comment data for improved performance
+
+### 4. Performance Metrics
+- Persistent bot performance caching
+- Real-time performance monitoring
+- Automated cache cleanup with TTL
+- Performance metrics tracking and analysis
+
+## Changelog
+
+### v1.1.0 (Latest)
+#### Added
+- Image processing optimizations:
+  - Automatic image resizing
+  - RGB conversion optimization
+  - Smart image caching
+  - Enhanced image context for Gemini
+- Sentiment analysis caching system
+- Comment loading optimizations
+- Bot performance metrics caching
+
+#### Changed
+- Improved comment tree traversal efficiency
+- Enhanced image handling logic
+- Updated cache management system
+
+#### Fixed
+- Memory usage in image processing
+- Performance issues in comment loading
+- Cache cleanup efficiency
+
+### v1.0.0 (Initial Release)
+- Basic Cake Day detection and celebration
+- Simple sentiment analysis
+- Reddit API integration
+- Initial database schema
+- Basic user tracking
+
 ## Ownership and Contributions
 CakeDayBot is owned and maintained solely by LordTSG. While contributions and suggestions are welcome, all changes must be approved by the owner to ensure the integrity and consistency of the bot. Forks and derivative bots are discouraged to maintain CakeDayBot as the only official Cake Day bot.
 

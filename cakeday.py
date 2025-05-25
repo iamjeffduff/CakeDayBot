@@ -1,16 +1,31 @@
 import sqlite3
 import praw
+import prawcore
+import random
 from datetime import datetime, timezone, timedelta
+import hashlib
+import requests
 import time
 from google import genai  # Import the genai library
 from pytz import timezone as pytz_timezone  # Rename pytz's timezone to avoid conflicts
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer  # Import sentiment analyzer
 from config import CLIENT_ID, CLIENT_SECRET, USER_AGENT, REDDIT_USERNAME, REDDIT_PASSWORD, DATABASE_NAME, API_CALL_DELAY, GEMINI_API_KEY, GEMINI_MODELS  # Add GEMINI_MODELS
-import prawcore
-import random
 from models import Database, SubredditManager, WishedUsersManager
+from PIL import Image
+from io import BytesIO
+from pathlib import Path
 
-# Initialize database and manager instances
+# Create global instance of SentimentIntensityAnalyzer for efficiency
+SENTIMENT_ANALYZER = SentimentIntensityAnalyzer()
+
+# Cache for sentiment scores to avoid recalculation
+SENTIMENT_CACHE = {}
+
+# Create an images directory if it doesn't exist
+IMAGES_DIR = Path("images")
+IMAGES_DIR.mkdir(exist_ok=True)
+
+# Initialize global instances
 db = Database(DATABASE_NAME)
 subreddit_mgr = SubredditManager(db)
 wished_users_mgr = WishedUsersManager(db)
@@ -243,7 +258,8 @@ def is_cake_day(reddit, username):
 
 def analyze_sentiment(text):
     """
-    Analyze the sentiment of a given text using Vader SentimentIntensityAnalyzer.
+    Analyze the sentiment of a given text using the global Vader SentimentIntensityAnalyzer instance.
+    Uses caching to avoid recalculating sentiment for the same text.
 
     Args:
         text (str): The text to analyze.
@@ -251,8 +267,14 @@ def analyze_sentiment(text):
     Returns:
         str: The overall sentiment ('positive', 'neutral', or 'negative').
     """
-    analyzer = SentimentIntensityAnalyzer()
-    sentiment_scores = analyzer.polarity_scores(text)
+    # Use cache if available
+    if text in SENTIMENT_CACHE:
+        sentiment_scores = SENTIMENT_CACHE[text]
+    else:
+        # Calculate and cache the sentiment
+        sentiment_scores = SENTIMENT_ANALYZER.polarity_scores(text)
+        SENTIMENT_CACHE[text] = sentiment_scores
+
     if sentiment_scores['compound'] >= 0.05:
         return "positive"
     elif sentiment_scores['compound'] <= -0.05:
@@ -260,16 +282,34 @@ def analyze_sentiment(text):
     else:
         return "neutral"
 
-def generate_cake_day_message(client, model_name, prompt):
+# Cleanup cache periodically (every 1000 items)
+def cleanup_sentiment_cache(max_size=1000):
+    """Clean up the sentiment cache if it grows too large."""
+    if len(SENTIMENT_CACHE) > max_size:
+        SENTIMENT_CACHE.clear()
+
+def generate_cake_day_message(client, model_name, prompt, image_path=None):
     """Generate a cake day message using the Gemini API."""
     try:
         if not client or not model_name:
             return "Happy Cake Day! 🎂"
             
         print(f"    🤖 Generating message with model: {model_name}")
+        
+        if image_path:  
+            try:
+                img = Image.open(image_path)  # Image is already in RGB from download_and_process_image
+                print("    🖼️ Including image in prompt")
+                contents = [img, prompt]
+            except Exception as e:
+                print(f"    ⚠️ Error loading image: {str(e)}")
+                contents = prompt
+        else:
+            contents = prompt
+            
         response = client.models.generate_content(
             model=model_name,
-            contents=prompt
+            contents=contents
         )
         
         if response and hasattr(response, 'text'):
@@ -370,12 +410,10 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None, bot_p
                     "sentiment": post_sentiment,
                     "reddit_score": f"{item.score:+}",
                     "is_cake_day": True
-                })
-
-                # Fetch up to 10 top-level comments
+                })                # Fetch limited top-level comments efficiently
                 submission = item
-                submission.comments.replace_more(limit=None)  # Load all top-level comments
-                for comment in submission.comments[:10]:  # Limit to 10 comments
+                submission.comments.replace_more(limit=0)  # Don't expand any MoreComments
+                for comment in list(submission.comments)[:10]:  # Limit to 10 comments
                     comment_text = comment.body[:500] if hasattr(comment, "body") else "(no text content)"
                     comment_sentiment = analyze_sentiment(comment_text)
                     comment_data = {
@@ -395,27 +433,43 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None, bot_p
                     comment_chain_context.append(comment_data) # Add the comment to the context
                     
         except Exception as e:
-            print(f"    ⚠️ Error collecting comment chain context: {e}")
-
-        # Calculate sentiment statistics
+            print(f"    ⚠️ Error collecting comment chain context: {e}")        # Calculate sentiment statistics using the global analyzer instance
         sentiment_scores = [analyze_sentiment(entry["text"]) for entry in comment_chain_context]
-        analyzer = SentimentIntensityAnalyzer()  # Create an instance of SentimentIntensityAnalyzer
-        average_sentiment_score = sum([analyzer.polarity_scores(entry["text"])["compound"] for entry in comment_chain_context]) / len(comment_chain_context)
-        most_extreme_sentiment = max(comment_chain_context, key=lambda x: abs(analyzer.polarity_scores(x["text"])["compound"]))
+        average_sentiment_score = sum([SENTIMENT_ANALYZER.polarity_scores(entry["text"])["compound"] for entry in comment_chain_context]) / len(comment_chain_context)
+        most_extreme_sentiment = max(comment_chain_context, key=lambda x: abs(SENTIMENT_ANALYZER.polarity_scores(x["text"])["compound"]))
         sentiment_trend = "positive" if average_sentiment_score > 0 else "negative" if average_sentiment_score < 0 else "neutral"
 
         # Construct the Gemini prompt with bot performance data
         bot_total_score = bot_performance[0] if bot_performance else 0
         bot_comment_count = bot_performance[1] if bot_performance else 0
-        bot_karma = (bot_total_score / bot_comment_count) if bot_comment_count > 0 else 0
+        bot_karma = (bot_total_score / bot_comment_count) if bot_comment_count > 0 else 0        # Get image context
+        image_info = get_post_images(item)
+        image_path = image_info['paths'][0] if image_info['paths'] else None
+        image_context = ""
+        if image_info['type']:
+            if image_info['is_main_content']:
+                if image_info['type'] == 'direct_image':
+                    image_context = "This is an image post."
+                elif image_info['type'] == 'gallery':
+                    image_context = f"This is a gallery post with {image_info['total_count']} images (showing first)."
+            else:
+                image_context = f"This post contains {image_info['total_count']} embedded image{'s' if image_info['total_count'] > 1 else ''}."
 
         gemini_message_prompt = f"""
-You are an AI-powered Reddit bot that celebrates users' Cake Days. Your goal is to craft a thoughtful and relevant message that fits naturally into the conversation, being transparent about your AI nature only when contextually appropriate (e.g., in AI-related subreddits or discussions). Keep responses concise and genuine. The focus should be on the cake day.
+You are a witty and cheeky AI-powered Reddit bot with a playful personality. Your mission is to celebrate Cake Days with clever, sometimes irreverent humor, while still being genuinely supportive. Think of yourself as that smart friend who can't help but add a dash of wit to everything, but knows when to dial it back. Adapt your sass level based on the subreddit and conversation tone.
+
+Personality Traits:
+- Witty and quick with wordplay
+- Playfully sarcastic (when appropriate)
+- Cleverly observant
+- Good at reading the room
+- Knows when to be serious vs playful
 
 Context:
 Subreddit: r/{subreddit_name}
 Post Title: {post_title if post_title else item.title}
 Post Type: {item.post_hint if hasattr(item, "post_hint") else "text"}
+{image_context if image_context else ""}
 Conversation Summary: {comment_chain_context}
 
 Sentiment Guide (Current conversation is {sentiment_trend}):
@@ -434,6 +488,29 @@ About the User:
 Performance Metrics:
 - Bot's Average Karma: {bot_karma:.2f}
 - Previous Interactions: {bot_comment_count}
+**Critical Instructions for Message Crafting:**
+- Primary Focus: Start with a warm Cake Day celebration, then connect it naturally to the conversation context.
+- Message Structure:
+    1. Lead with "Happy Cake Day!" (adjust tone based on sentiment)
+    2. Add context-relevant content (choose ONE based on karma/sentiment):
+        - A brief, relevant "On This Day" historical fact
+        - An interesting "Did You Know?" related to the topic
+        - A thoughtful observation about the discussion theme
+        - A gentle emotion or shared experience that resonates with the conversation
+- Example of What to AVOID: Generic or overly formal responses that lack personality
+- Examples of What to AIM FOR:
+    - Technical context: "Happy Cake Day! 🎂 While you're debugging that code, I hope you're also debugging into some cake. Just maybe not simultaneously..."
+    - Emotional context: "Happy Cake Day! 🎂 Your enthusiasm for quantum physics is contagious - and unlike quantum superposition, this cake is definitely real!"
+    - Historical context: "Happy Cake Day! 🎂 On this day in 1989, the first GPS satellite was launched. Unlike that satellite, I trust you won't get lost finding your cake!"
+    - Casual context: "Happy Cake Day! 🎂 I see you're discussing dad jokes. Well, I donut want to miss this opportunity to celebrate!"
+- Guidelines for Additional Content:
+    - Keep facts short and directly relevant
+    - Match the technical level of the conversation
+    - For serious discussions, use professional tone and relevant facts
+    - For casual conversations, use light-hearted facts or shared experiences
+    - If sentiment is negative, focus on supportive, uplifting facts or observations
+- Brevity is Key: Keep the entire message concise and natural
+
 Message Guidelines Based on Performance:"""
 
         # Note: Remove the existing karma bands and replace with this more specific guidance
@@ -520,10 +597,17 @@ Your response should be only the cake day message, ready to post as a comment.""
         """)
 
         try:
-            client, model_name = get_gemini_client()
+            client, model_name = get_gemini_client()    
             if client and model_name:
                 print(f"    🤖 Using Gemini Model: {model_name}")
-                gemini_message = generate_cake_day_message(client, model_name, gemini_message_prompt)
+                # Only pass image if it's meaningful to the context
+                use_image = image_path and image_info['is_main_content']
+                gemini_message = generate_cake_day_message(
+                    client, 
+                    model_name, 
+                    gemini_message_prompt,
+                    image_path if use_image else None
+                )
             else:
                 print("    ⚠️ Failed to initialize Gemini client, using fallback message")
                 gemini_message = "Happy Cake Day! 🎂"
@@ -567,30 +651,40 @@ def process_subreddit(reddit, subreddit_name, last_post_checked, bot_score):
             print(f"  Checking post: '{post.title}' by {post.author.name} with {post.num_comments} comments. Please stand by...")
             if process_item(reddit, post, "post", subreddit_name, bot_performance=bot_score):  # Use bot_score passed from main loop
                 cake_day_count += 1  # Increment only if a Cake Day was found
-            time.sleep(API_CALL_DELAY)  # Be mindful of rate limits
-
-        post.comments.replace_more(limit=None)  # Load all top-level comments
-        for comment in post.comments.list():
+            time.sleep(API_CALL_DELAY)  # Be mindful of rate limits        # Load comments efficiently - only expand first level
+        post.comments.replace_more(limit=0)  # Don't expand any MoreComments
+        for comment in list(post.comments)[:50]:  # Limit to first 50 top-level comments
             if comment.author:
-                if process_item(reddit, comment, "comment", subreddit_name, post.title, bot_performance=bot_score):  # Use bot_score passed from main loop
-                    cake_day_count += 1  # Increment only if a Cake Day was found
+                if process_item(reddit, comment, "comment", subreddit_name, post.title, bot_performance=bot_score):
+                    cake_day_count += 1
                 time.sleep(API_CALL_DELAY)
 
     print(f"\n🎉 Total Cake Days found in r/{subreddit_name}: {cake_day_count} {"" if cake_day_count == 0 else "🎉🎉"}")
     return new_last_post_checked
 
-def get_bot_comment_score(reddit, subreddit_name, days_to_check=30):
+def get_bot_comment_score(reddit, subreddit_name, days_to_check=30, cache_ttl=900):
     """
-    Calculate the overall score of the bot's comments in a subreddit.
+    Calculate the overall score of the bot's comments in a subreddit with caching.
 
     Args:
         reddit: The PRAW Reddit instance.
         subreddit_name: The name of the subreddit.
         days_to_check: Number of days to look back for comments (default: 30)
+        cache_ttl: Time in seconds before cache expires (default: 15 minutes)
 
     Returns:
         tuple: (total_score, comment_count)
     """
+    # Check cache first
+    cached_score = db.get_bot_performance(subreddit_name, cache_ttl)
+    if cached_score:
+        total_score, comment_count = cached_score
+        print(f"\n📈 Summary for r/{subreddit_name} (cached):")
+        print(f"  - Total comments found: {comment_count}")
+        print(f"  - Total score: {total_score:+}")
+        print(f"  - Average score per comment: {(total_score/comment_count if comment_count else 0):+.2f}\n")
+        return total_score, comment_count
+
     try:
         bot_user = reddit.redditor(REDDIT_USERNAME)
         total_score = 0
@@ -605,7 +699,10 @@ def get_bot_comment_score(reddit, subreddit_name, days_to_check=30):
                 total_score += comment.score
                 comment_count += 1
 
-        print(f"\n📈 Summary for r/{subreddit_name}:")
+        # Cache the results
+        db.update_bot_performance(subreddit_name, total_score, comment_count)
+
+        print(f"\n📈 Summary for r/{subreddit_name} (fresh):")
         print(f"  - Total comments found: {comment_count}")
         print(f"  - Total score: {total_score:+}")
         print(f"  - Average score per comment: {(total_score/comment_count if comment_count else 0):+.2f}\n")
@@ -615,14 +712,155 @@ def get_bot_comment_score(reddit, subreddit_name, days_to_check=30):
         print(f"⚠️ Error fetching bot comments for r/{subreddit_name}: {e}")
         return 0, 0
 
+def download_and_process_image(url, max_retries=3, cache_ttl=3600):  # 1 hour TTL by default
+    """
+    Downloads and processes an image from a URL, returning the local path.
+    
+    Args:
+        url: The URL of the image to download
+        max_retries: Maximum number of retry attempts
+        cache_ttl: Time in seconds to keep cached images (default: 1 hour)
+        
+    Returns:
+        str: Path to the downloaded image, or None if download failed
+    """
+    try:
+        # Generate a unique filename based on the URL
+        filename = hashlib.md5(url.encode()).hexdigest() + '.jpg'
+        filepath = IMAGES_DIR / filename
+        
+        # If we already have this image, check if it's still valid
+        if filepath.exists():
+            file_age = time.time() - filepath.stat().st_mtime
+            if file_age < cache_ttl:
+                return str(filepath)
+            else:
+                filepath.unlink()  # Delete expired cache
+            
+        # Download the image with retries
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()
+                
+                # Open and process image
+                img = Image.open(BytesIO(response.content))
+                
+                # Convert to RGB if needed (handles PNG, RGBA, etc.)
+                if img.mode in ('RGBA', 'P'):
+                    img = img.convert('RGB')
+                
+                # Resize if too large (max 1024px on longest side)
+                if max(img.size) > 1024:
+                    ratio = 1024 / max(img.size)
+                    new_size = tuple(int(dim * ratio) for dim in img.size)
+                    img = img.resize(new_size, Image.Resampling.LANCZOS)
+                
+                # Save the processed image with quality optimization
+                img.save(filepath, 'JPEG', quality=85, optimize=True)
+                return str(filepath)
+                
+            except requests.exceptions.RequestException as e:
+                if attempt == max_retries - 1:
+                    print(f"    ⚠️ Failed to download image after {max_retries} attempts: {str(e)}")
+                    return None
+                time.sleep(2 ** attempt)  # Exponential backoff
+            except Exception as e:
+                print(f"    ⚠️ Error processing image: {str(e)}")
+                return None
+                
+    except Exception as e:
+        print(f"    ⚠️ Error processing image: {str(e)}")
+        return None
+
+def get_post_images(item):
+    """
+    Extracts and downloads images from a Reddit post or comment, with context.
+    
+    Args:
+        item: A Reddit post or comment object
+        
+    Returns:
+        dict: Information about found images with their context
+            {
+                'paths': list of image file paths,
+                'type': 'direct_image'|'preview'|'gallery'|None,
+                'is_main_content': bool indicating if image is the main content,
+                'total_count': total number of images available
+            }
+    """
+    result = {
+        'paths': [],
+        'type': None,
+        'is_main_content': False,
+        'total_count': 0
+    }
+    
+    try:
+        # Handle different types of posts
+        if hasattr(item, 'url'):
+            # Direct image links
+            if any(item.url.lower().endswith(ext) for ext in ('.jpg', '.jpeg', '.png', '.gif')):
+                if path := download_and_process_image(item.url):
+                    result.update({
+                        'paths': [path],
+                        'type': 'direct_image',
+                        'is_main_content': True,
+                        'total_count': 1
+                    })
+            # Image posts with previews
+            elif hasattr(item, 'preview') and 'images' in item.preview and item.preview['images']:
+                if path := download_and_process_image(item.preview['images'][0]['source']['url']):
+                    result.update({
+                        'paths': [path],
+                        'type': 'preview',
+                        'is_main_content': item.is_self is False,  # True if it's a link post
+                        'total_count': len(item.preview['images'])
+                    })
+            # Gallery posts
+            elif hasattr(item, 'is_gallery') and item.is_gallery and hasattr(item, 'media_metadata'):
+                media_id = next((id for id in item.media_metadata if item.media_metadata[id]['e'] == 'Image'), None)
+                if media_id and (path := download_and_process_image(item.media_metadata[media_id]['s']['u'])):
+                    result.update({
+                        'paths': [path],
+                        'type': 'gallery',
+                        'is_main_content': True,
+                        'total_count': len(item.media_metadata)
+                    })
+                                
+    except Exception as e:
+        print(f"    ⚠️ Error extracting images: {str(e)}")
+        
+    return result
+
+def cleanup_old_images(max_age=3600):  # 1 hour default
+    """
+    Clean up old cached images to manage disk space.
+    
+    Args:
+        max_age: Maximum age of images in seconds before deletion
+    """
+    try:
+        current_time = time.time()
+        for image_file in IMAGES_DIR.glob('*.jpg'):
+            file_age = current_time - image_file.stat().st_mtime
+            if file_age > max_age:
+                try:
+                    image_file.unlink()
+                    print(f"    🗑️ Cleaned up old image: {image_file.name}")
+                except Exception as e:
+                    print(f"    ⚠️ Failed to delete old image {image_file.name}: {e}")
+    except Exception as e:
+        print(f"    ⚠️ Error during image cleanup: {e}")
+
 if __name__ == "__main__":
     # Initialize start time for total execution
     total_start_time = time.time()
     
     # Initialize Reddit instance
     reddit = get_reddit_instance()
-    
     wished_users_mgr.clear_expired()
+    cleanup_old_images()  # Clean up old images before starting new scan
     subreddit_info = subreddit_mgr.get_info()
     
     for subreddit_name, (last_post_checked, last_scan_time) in subreddit_info.items():

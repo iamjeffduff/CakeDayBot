@@ -45,6 +45,46 @@ class Database:
             attempt += 1
         return False, None
 
+    def get_bot_performance(self, subreddit_name, cache_ttl=900):
+        """
+        Get cached bot performance metrics for a subreddit.
+        
+        Args:
+            subreddit_name: Name of the subreddit
+            cache_ttl: Time in seconds before cache expires (default: 15 minutes)
+
+        Returns:
+            tuple: (total_score, comment_count) or None if cache missing/expired
+        """
+        success, result = self.execute_operation(
+            "SELECT total_score, comment_count, last_updated FROM bot_performance_cache WHERE subreddit_name = ?",
+            (subreddit_name,)
+        )
+        
+        if success and result:
+            total_score, comment_count, last_updated = result[0]
+            if time.time() - last_updated < cache_ttl:
+                return total_score, comment_count
+        return None
+
+    def update_bot_performance(self, subreddit_name, total_score, comment_count):
+        """
+        Update cached bot performance metrics for a subreddit.
+        
+        Args:
+            subreddit_name: Name of the subreddit
+            total_score: Total karma score
+            comment_count: Number of comments
+        """
+        return self.execute_operation(
+            """
+            INSERT OR REPLACE INTO bot_performance_cache 
+            (subreddit_name, total_score, comment_count, last_updated)
+            VALUES (?, ?, ?, ?)
+            """,
+            (subreddit_name, total_score, comment_count, time.time())
+        )[0]
+
 class SubredditManager:
     def __init__(self, db):
         self.db = db
