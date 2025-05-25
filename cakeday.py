@@ -310,7 +310,7 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None, bot_p
 
                 # Fetch up to 5 parent comments
                 while parent and len(parent_chain) < 5:
-                    parent_text = parent.body[:500] if hasattr(parent, "body") else (parent.selftext[:250] if hasattr(parent, "selftext") else "(no text content)")
+                    parent_text = parent.body[:500] if hasattr(parent, "body") else (parent.selftext[:500] if hasattr(parent, "selftext") else "(no text content)")
                     parent_sentiment = analyze_sentiment(parent_text)
                     parent_chain.insert(0, {  # Insert at the beginning to maintain order
                         "author": parent.author.name if parent.author else "[deleted]",
@@ -616,6 +616,9 @@ def get_bot_comment_score(reddit, subreddit_name, days_to_check=30):
         return 0, 0
 
 if __name__ == "__main__":
+    # Initialize start time for total execution
+    total_start_time = time.time()
+    
     # Initialize Reddit instance
     reddit = get_reddit_instance()
     
@@ -624,7 +627,23 @@ if __name__ == "__main__":
     
     for subreddit_name, (last_post_checked, last_scan_time) in subreddit_info.items():
         print(f"\n🔍 Processing r/{subreddit_name}")
+        # Start timing this subreddit
+        subreddit_start_time = time.time()
+        
         bot_score = get_bot_comment_score(reddit, subreddit_name)
         new_last_post_checked = process_subreddit(reddit, subreddit_name, last_post_checked, bot_score)
         subreddit_mgr.update_last_post_checked(subreddit_name, new_last_post_checked)
         subreddit_mgr.update_scan_time(subreddit_name)
+          # Calculate and print elapsed time for this subreddit
+        subreddit_elapsed_time = time.time() - subreddit_start_time
+        hours = int(subreddit_elapsed_time // 3600)
+        minutes = int((subreddit_elapsed_time % 3600) // 60)
+        seconds = subreddit_elapsed_time % 60
+        print(f"⏱️  Time to process r/{subreddit_name}: {f'{hours}h ' if hours > 0 else ''}{f'{minutes}m ' if minutes > 0 or hours > 0 else ''}{seconds:.2f}s")
+
+    # Calculate and print total execution time
+    total_elapsed_time = time.time() - total_start_time
+    hours = int(total_elapsed_time // 3600)
+    minutes = int((total_elapsed_time % 3600) // 60)
+    seconds = total_elapsed_time % 60
+    print(f"\n🏁 Total execution time: {f'{hours}h ' if hours > 0 else ''}{f'{minutes}m ' if minutes > 0 or hours > 0 else ''}{seconds:.2f}s")
