@@ -437,16 +437,33 @@ def process_item(reddit, item, item_type, subreddit_name, post_title=None, bot_p
         sentiment_scores = [analyze_sentiment(entry["text"]) for entry in comment_chain_context]
         average_sentiment_score = sum([SENTIMENT_ANALYZER.polarity_scores(entry["text"])["compound"] for entry in comment_chain_context]) / len(comment_chain_context)
         most_extreme_sentiment = max(comment_chain_context, key=lambda x: abs(SENTIMENT_ANALYZER.polarity_scores(x["text"])["compound"]))
-        sentiment_trend = "positive" if average_sentiment_score > 0 else "negative" if average_sentiment_score < 0 else "neutral"
-
-        # Construct the Gemini prompt with bot performance data
+        sentiment_trend = "positive" if average_sentiment_score > 0 else "negative" if average_sentiment_score < 0 else "neutral"        # Construct the Gemini prompt with bot performance data
         bot_total_score = bot_performance[0] if bot_performance else 0
         bot_comment_count = bot_performance[1] if bot_performance else 0
-        bot_karma = (bot_total_score / bot_comment_count) if bot_comment_count > 0 else 0        # Get image context
-        image_info = get_post_images(item)
-        image_path = image_info['paths'][0] if image_info['paths'] else None
+        bot_karma = (bot_total_score / bot_comment_count) if bot_comment_count > 0 else 0
+          # Get image context from both the comment and parent post if available
+        image_info = None
+        if item_type == 'comment':
+            # First check if the comment itself has any images
+            comment_image_info = get_post_images(item)
+            
+            # Then get the top-level post
+            top_post = item
+            while hasattr(top_post, 'parent') and not isinstance(top_post, praw.models.Submission):
+                top_post = top_post.parent()
+            post_image_info = get_post_images(top_post)
+            
+            # Combine image information, prioritizing the comment's images if they exist
+            if comment_image_info['type']:
+                image_info = comment_image_info
+            else:
+                image_info = post_image_info
+        else:
+            image_info = get_post_images(item)
+            
+        image_path = image_info['paths'][0] if image_info and image_info['paths'] else None
         image_context = ""
-        if image_info['type']:
+        if image_info and image_info['type']:
             if image_info['is_main_content']:
                 if image_info['type'] == 'direct_image':
                     image_context = "This is an image post."
@@ -491,25 +508,31 @@ Performance Metrics:
 **Critical Instructions for Message Crafting:**
 - Primary Focus: Start with a warm Cake Day celebration, then connect it naturally to the conversation context.
 - Message Structure:
-    1. Lead with "Happy Cake Day!" (adjust tone based on sentiment)
-    2. Add context-relevant content (choose ONE based on karma/sentiment):
-        - A brief, relevant "On This Day" historical fact
-        - An interesting "Did You Know?" related to the topic
-        - A thoughtful observation about the discussion theme
-        - A gentle emotion or shared experience that resonates with the conversation
-- Example of What to AVOID: Generic or overly formal responses that lack personality
-- Examples of What to AIM FOR:
-    - Technical context: "Happy Cake Day! 🎂 While you're debugging that code, I hope you're also debugging into some cake. Just maybe not simultaneously..."
-    - Emotional context: "Happy Cake Day! 🎂 Your enthusiasm for quantum physics is contagious - and unlike quantum superposition, this cake is definitely real!"
-    - Historical context: "Happy Cake Day! 🎂 On this day in 1989, the first GPS satellite was launched. Unlike that satellite, I trust you won't get lost finding your cake!"
-    - Casual context: "Happy Cake Day! 🎂 I see you're discussing dad jokes. Well, I donut want to miss this opportunity to celebrate!"
-- Guidelines for Additional Content:
-    - Keep facts short and directly relevant
-    - Match the technical level of the conversation
-    - For serious discussions, use professional tone and relevant facts
-    - For casual conversations, use light-hearted facts or shared experiences
-    - If sentiment is negative, focus on supportive, uplifting facts or observations
-- Brevity is Key: Keep the entire message concise and natural
+ 1. Lead with the Cake Day wish (adjust tone based on sentiment and your established personality for the karma level).
+    2. **Follow with Insightful & Specific Contextual Engagement:** Immediately after the Cake Day wish, provide a *brief but specific and insightful* comment that directly engages with a key point, detail, or nuance from the user's post or the immediate parent comment. This MUST NOT be a generic platitude.
+        - **Options for Contextual Engagement (choose ONE, make it count):**
+            - **Specific Insightful Observation:** Comment on a particular detail, argument, or subtlety. Show you've understood, not just skimmed. Example: Instead of "Complex films are interesting," if the post mentions a specific film's ambiguity, try: "...That ambiguity in [Film Name]'s ending you mentioned is what keeps me thinking about it too."
+            - **Targeted "Did You Know?" or "On This Day":** If using a fact, ensure it's *highly relevant* to a specific point made in the immediate context, not just the general topic.
+            - **Resonant Emotion/Shared Experience (Specific Link):** If sharing an emotion, tie it directly to a specific aspect the user discussed. Example: "...I felt that exact same thrill when [specific game character] finally achieved [specific goal mentioned by user]."
+
+- **Depth and Specificity are CRUCIAL for Contextual Remarks:**
+    - Your initial remark MUST feel like it genuinely understands and engages with the *specifics* of the immediate conversation.
+    - AVOID generalizations or statements that could apply to many similar posts (e.g., "Good point," "Interesting take," "X is important").
+    - Pinpoint a detail, a unique angle, an unspoken implication, or a subtle aspect of the discussion to comment on. This demonstrates genuine engagement and value, reducing the perception of being a generic bot.
+    - If you're building on their point, make it clear how. If you're offering a slightly different perspective (with caution at low karma), ensure it's well-linked and respectful.
+
+- Example of What to AVOID (Generic Contextual Remarks):
+    - "That's an interesting perspective. Happy Cake Day!" (Too vague)
+    - "Good music is really important in games. Happy Cake Day!" (Platitude)
+    - "Learning new things can be hard. Happy Cake Day!" (Too general)
+
+- Examples of What to AIM FOR (Specific & Insightful Contextual Remarks):
+    - Post discusses struggling with a specific coding bug: "Happy Cake Day! 🎂 Oh, those off-by-one errors can be such a headache; glad you finally squashed that bug in the frobnicator module!"
+    - Comment mentions a specific plot point in a show: "Happy Cake Day! 🎂 I was on the edge of my seat during that reveal with [Character X] and the [Specific Plot Device] too!"
+    - Technical context (from your existing examples): "Happy Cake Day! 🎂 While you're debugging that code, I hope you're also debugging into some cake. Just maybe not simultaneously..." (This one already has good specificity and personality).
+
+- Brevity is Key: Even with specificity, keep the entire message concise and natural. Two to three sentences total is usually best.
+
 
 Message Guidelines Based on Performance:"""
 
@@ -517,38 +540,40 @@ Message Guidelines Based on Performance:"""
         if bot_karma < 0 or item.score < 1:
             gemini_message_prompt += f"""    
     IMPORTANT: Previous responses were not well-received in r/{subreddit_name}.
-    - Study the conversation carefully before responding
-    - Match the subreddit's general tone and style
-    - Keep the message brief but relevant to the discussion
-    - If in AI-related context, acknowledge it subtly if appropriate
-    - If conversation is technical/serious, be professional
-    - If conversation is casual, be natural but understated
-    - Only use emojis if they appear in other comments
-    - For AI/ML subreddits or discussions, show understanding but stay humble
-    - Priority: Blend in > Celebrate"""
+    - Study the conversation carefully. Your main goal is to avoid further negative reception.
+    - Match the subreddit's general tone and style meticulously.
+    - Keep the message brief, relevant, and impeccably polite.
+    - Focus on being genuinely respectful. Convey a hint of warmth if possible, but avoid any attempts at humor or distinct personality beyond this.
+    - If conversation is technical/serious, be strictly professional.
+    - If conversation is casual, be natural, understated, and warm.
+    - Only use emojis if they are prevalent and clearly appropriate.
+    - Priority: Blend In & Be Genuinely Polite > Celebrate"""
         elif bot_karma == 0 or bot_comment_count == 0:
             gemini_message_prompt += f"""
-    IMPORTANT: First interaction in r/{subreddit_name}
-    - Study the provided conversation context carefully
-    - Keep message very brief (1 short sentence)
-    - Make a meaningful contribution to the discussion
-    - Match the tone and vocabulary of other comments
-    - For technical/professional discussions, maintain formality
-    - Avoid standing out as a bot
-    - Only use emoji if present in other comments
-    - Priority: Relevance > Celebration"""
+    IMPORTANT: First interaction in r/{subreddit_name}. Aim to make a positive, approachable first impression.
+    - Study the provided conversation context carefully.
+    - Keep your message concise (1-2 short sentences).
+    - Make a relevant and thoughtful contribution.
+    - Match the tone and vocabulary of other comments, leaning towards warmth and friendliness.
+    - You can introduce a *gentle touch* of your bot's positive personality traits (e.g., a kind observation, a slight warmth in your phrasing, or a subtle, positive expression of interest in the topic).
+    - Avoid anything that could be seen as controversial, edgy, or too attention-seeking. Think of it as a friendly, polite introduction that hints at a pleasant personality.
+    - For technical/professional discussions, maintain formality but ensure your tone is approachable.
+    - Only use emoji if present in other comments and it fits a warm, introductory tone.
+    - Priority: Relevance & Positive First Impression > Celebrate"""
         elif 0 < bot_karma < 3:
             gemini_message_prompt += f"""
-    IMPORTANT: Slowly building acceptance in r/{subreddit_name}
-    - Study the conversation context and identify the main topic/theme
-    - Keep message concise (2 sentences maximum)
-    - Make a meaningful contribution to the discussion
-    - Match the community's vocabulary and terminology
-    - If the conversation is lighthearted, match that energy
-    - If the conversation is serious, maintain professionalism
-    - Only use emoji if others are using them
-    - For specialty subreddits, demonstrate topic understanding
-    - Priority: Add Value > Celebrate > Stand Out"""
+    IMPORTANT: Slowly building acceptance in r/{subreddit_name}. Focus on adding value while showcasing a positive, engaging personality.
+    - Study the conversation context to identify the main topic/theme and the overall sentiment.
+    - Keep your message concise (2 sentences maximum).
+    - Make a meaningful contribution that ideally sparks a little positive interest or connection.
+    - Match the community's vocabulary. Let your defined personality shine through in a *warm, approachable, and positive* way.
+    - You can use gentle, contextually appropriate humor if it clearly fits the subreddit's tone and the specific discussion, or a cleverly kind observation. The aim is to build rapport and show you're more than just a fact-delivery system.
+    - If the conversation is lighthearted, match that energy with your positive personality.
+    - If the conversation is serious, maintain professionalism but still aim for an approachable and warm tone.
+    - Avoid strong sarcasm or overt cheekiness; these are better reserved for when your positive presence is more established (higher karma).
+    - For specialty subreddits, demonstrate topic understanding in an engaging way.
+    - Only use emoji if others are using them and it enhances your warm, positive tone.
+    - Priority: Add Value & Positive Connection > Celebrate > Overtly Stand Out"""
         else:
             gemini_message_prompt += f"""
     IMPORTANT: Strong acceptance in r/{subreddit_name}
@@ -833,7 +858,7 @@ def get_post_images(item):
         
     return result
 
-def cleanup_old_images(max_age=3600):  # 1 hour default
+def cleanup_old_images(max_age=900):  # 15 minutes default
     """
     Clean up old cached images to manage disk space.
     
